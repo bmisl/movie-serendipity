@@ -117,31 +117,7 @@ st.title("🎬 Serendipitous Movie Picker")
 
 ensure_api_key(OMDB_API_KEY, "OMDB_API_KEY")
 
-# 1️⃣ Step One: Type of filter
-filter_type = st.selectbox("Choose a type:", ["Genre", "Actor", "Director"])
 
-# 2️⃣ Step Two: Dynamic dropdown based on type
-if filter_type == "Genre":
-    choices = [
-        "Action",
-        "Adventure",
-        "Comedy",
-        "Drama",
-        "Horror",
-        "Sci-Fi",
-        "Romance",
-        "Thriller",
-    ]
-elif filter_type == "Actor":
-    ensure_api_key(TMDB_API_KEY, "TMDB_API_KEY")
-    choices = fetch_tmdb_people("Acting")
-else:
-    ensure_api_key(TMDB_API_KEY, "TMDB_API_KEY")
-    choices = fetch_tmdb_people("Directing")
-
-selection = st.selectbox(f"Select a {filter_type.lower()}:", choices)
-
-# 3️⃣ Fetch movies from OMDb (broad search)
 def search_movies(term: str) -> List[dict]:
     """Fetch up to ~20 movie results by search term."""
 
@@ -161,28 +137,10 @@ def search_movies(term: str) -> List[dict]:
         return data.get("Search", [])
     return []
 
-movies = search_movies(selection)
 
-# 4️⃣ Compute median year
-years = []
-for movie in movies:
-    year = movie.get("Year", "")
-    if year.isdigit():
-        years.append(int(year))
+def fetch_movie_detail(imdb_id: str) -> Optional[dict]:
+    """Retrieve detailed OMDb information for a single movie."""
 
-median_year = int(statistics.median(years)) if years else None
-if median_year is not None:
-    st.caption(f"📅 Median release year for {selection}: {median_year}")
-
-# 5️⃣ Buttons for older / newer
-col1, col2 = st.columns(2)
-
-def show_random_movie(filtered_movies):
-    if not filtered_movies:
-        st.warning("No movies match that range.")
-        return
-    pick = random.choice(filtered_movies)
-    imdb_id = pick["imdbID"]
     try:
         detail_response = requests.get(
             BASE_URL,
@@ -193,11 +151,16 @@ def show_random_movie(filtered_movies):
         detail = detail_response.json()
     except requests.RequestException:
         st.error("Couldn't load full movie details right now.")
-        return
+        return None
 
     if detail.get("Response") != "True":
         st.warning("Movie details are currently unavailable.")
-        return
+        return None
+    return detail
+
+
+def render_movie_detail(detail: dict) -> None:
+    """Display the selected movie information."""
 
     if detail.get("Poster") and detail["Poster"] != "N/A":
         st.image(detail["Poster"], width=200)
@@ -210,24 +173,113 @@ def show_random_movie(filtered_movies):
     if detail.get("Plot") and detail["Plot"] != "N/A":
         st.write(detail["Plot"])
 
-if col1.button("⬅️ Older"):
-    if median_year is None:
-        st.warning("Not enough information to split movies by year yet.")
-    else:
-        older_movies = [
-            movie
-            for movie in movies
-            if movie["Year"].isdigit() and int(movie["Year"]) <= median_year
-        ]
-        show_random_movie(older_movies)
 
-if col2.button("➡️ Newer"):
-    if median_year is None:
-        st.warning("Not enough information to split movies by year yet.")
-    else:
-        newer_movies = [
+def movies_by_era(movies: List[dict], median_year: Optional[int], era: str) -> List[dict]:
+    """Filter movies according to the selected release window."""
+
+    if not movies or median_year is None or era == "All releases":
+        return movies
+    if era.startswith("Older"):
+        return [
             movie
             for movie in movies
-            if movie["Year"].isdigit() and int(movie["Year"]) > median_year
+            if movie.get("Year", "").isdigit()
+            and int(movie["Year"]) <= median_year
         ]
-        show_random_movie(newer_movies)
+    if era.startswith("Newer"):
+        return [
+            movie
+            for movie in movies
+            if movie.get("Year", "").isdigit()
+            and int(movie["Year"]) > median_year
+        ]
+    return movies
+
+
+if "current_pick" not in st.session_state:
+    st.session_state["current_pick"] = None
+    st.session_state["current_pick_detail"] = None
+    st.session_state["current_pick_meta"] = None
+
+
+col1, col2, col3 = st.columns(3, gap="small")
+
+with col1:
+    filter_type = st.radio("Type", ["Genre", "Actor", "Director"], key="filter_type")
+
+if filter_type == "Genre":
+    choices = [
+        "Action",
+        "Adventure",
+        "Comedy",
+        "Drama",
+        "Horror",
+        "Sci-Fi",
+        "Romance",
+        "Thriller",
+    ]
+elif filter_type == "Actor":
+    ensure_api_key(TMDB_API_KEY, "TMDB_API_KEY")
+    choices = fetch_tmdb_people("Acting")
+else:
+    ensure_api_key(TMDB_API_KEY, "TMDB_API_KEY")
+    choices = fetch_tmdb_people("Directing")
+
+with col2:
+    selection = st.radio(
+        f"Select a {filter_type.lower()}",
+        choices,
+        key=f"selection_{filter_type.lower()}",
+    )
+
+movies = search_movies(selection)
+
+years = []
+for movie in movies:
+    year = movie.get("Year", "")
+    if year.isdigit():
+        years.append(int(year))
+
+median_year = int(statistics.median(years)) if years else None
+
+with col3:
+    if median_year is None:
+        era = "All releases"
+        st.markdown("**Release window**")
+        st.caption("More data is needed for year-based picks.")
+    else:
+        era_options = [
+            "All releases",
+            f"Older (≤ {median_year})",
+            f"Newer (> {median_year})",
+        ]
+        era = st.radio("Release window", era_options, key="release_window")
+    reroll = st.button("🎲 Surprise me", key="reroll")
+
+if median_year is not None:
+    st.caption(f"📅 Median release year for {selection}: {median_year}")
+
+filtered_movies = movies_by_era(movies, median_year, era)
+
+meta = (filter_type, selection, era)
+if st.session_state.get("current_pick_meta") != meta:
+    st.session_state["current_pick_meta"] = meta
+    st.session_state["current_pick"] = None
+    st.session_state["current_pick_detail"] = None
+
+if reroll:
+    st.session_state["current_pick"] = None
+    st.session_state["current_pick_detail"] = None
+
+if not filtered_movies:
+    st.warning("No movies available for that combination right now.")
+else:
+    if st.session_state.get("current_pick") is None:
+        pick = random.choice(filtered_movies)
+        detail = fetch_movie_detail(pick["imdbID"])
+        if detail:
+            st.session_state["current_pick"] = pick
+            st.session_state["current_pick_detail"] = detail
+    detail = st.session_state.get("current_pick_detail")
+    if detail:
+        render_movie_detail(detail)
