@@ -1,14 +1,28 @@
 # serendipity_v3.py
 import os
 import random
-import statistics
-from typing import List, Optional
+import re
+from typing import Dict, List, Optional
 
 import requests
 import streamlit as st
 
 BASE_URL = "https://www.omdbapi.com/"
 TMDB_BASE_URL = "https://api.themoviedb.org/3/person/popular"
+
+GENRES = [
+    "Action",
+    "Adventure",
+    "Comedy",
+    "Drama",
+    "Horror",
+    "Sci-Fi",
+    "Romance",
+    "Thriller",
+]
+
+DIRECTOR_COUNT = 9
+ACTOR_COUNT = 20
 
 
 def get_secret(key: str) -> Optional[str]:
@@ -118,26 +132,40 @@ st.title("🎬 Serendipitous Movie Picker")
 ensure_api_key(OMDB_API_KEY, "OMDB_API_KEY")
 
 
-def search_movies(term: str) -> List[dict]:
-    """Fetch up to ~20 movie results by search term."""
+@st.cache_data(show_spinner=False)
+def search_movies(term: str, max_pages: int = 3) -> List[dict]:
+    """Fetch a batch of movie search results from OMDb."""
 
+    collected: List[dict] = []
     try:
-        response = requests.get(
-            BASE_URL,
-            params={"s": term, "apikey": OMDB_API_KEY},
-            timeout=10,
-        )
-        response.raise_for_status()
-        data = response.json()
+        for page in range(1, max_pages + 1):
+            response = requests.get(
+                BASE_URL,
+                params={
+                    "s": term,
+                    "apikey": OMDB_API_KEY,
+                    "type": "movie",
+                    "page": page,
+                },
+                timeout=10,
+            )
+            response.raise_for_status()
+            data = response.json()
+            if data.get("Response") != "True":
+                break
+            collected.extend(data.get("Search", []))
+            total_results_text = data.get("totalResults", "")
+            total_results = int(total_results_text) if total_results_text.isdigit() else 0
+            if total_results and len(collected) >= total_results:
+                break
     except requests.RequestException:
         st.error("Unable to reach OMDb right now. Please try again later.")
         return []
 
-    if data.get("Response") == "True":
-        return data.get("Search", [])
-    return []
+    return [movie for movie in collected if movie.get("Type", "").lower() == "movie"]
 
 
+@st.cache_data(show_spinner=False)
 def fetch_movie_detail(imdb_id: str) -> Optional[dict]:
     """Retrieve detailed OMDb information for a single movie."""
 
@@ -156,6 +184,8 @@ def fetch_movie_detail(imdb_id: str) -> Optional[dict]:
     if detail.get("Response") != "True":
         st.warning("Movie details are currently unavailable.")
         return None
+    if detail.get("Type", "").lower() != "movie":
+        return None
     return detail
 
 
@@ -163,123 +193,202 @@ def render_movie_detail(detail: dict) -> None:
     """Display the selected movie information."""
 
     if detail.get("Poster") and detail["Poster"] != "N/A":
-        st.image(detail["Poster"], width=200)
-    st.markdown(
-        f"**{detail.get('Title', 'Unknown Title')} ({detail.get('Year', 'N/A')})** "
-        f"⭐ {detail.get('imdbRating', 'N/A')}"
-    )
-    if detail.get("Genre"):
-        st.caption(detail["Genre"])
+        st.image(detail["Poster"], width=220)
+
+    title = detail.get("Title", "Unknown Title")
+    year = detail.get("Year", "N/A")
+    rating = detail.get("imdbRating", "N/A")
+    st.markdown(f"**{title} ({year})** ⭐ {rating}")
+
+    metadata: Dict[str, str] = {
+        "Genre": detail.get("Genre", ""),
+        "Runtime": detail.get("Runtime", ""),
+        "Rated": detail.get("Rated", ""),
+        "Director": detail.get("Director", ""),
+        "Writer": detail.get("Writer", ""),
+        "Actors": detail.get("Actors", ""),
+        "Awards": detail.get("Awards", ""),
+        "Box Office": detail.get("BoxOffice", ""),
+    }
+
+    for label, value in metadata.items():
+        if value and value != "N/A":
+            st.markdown(f"**{label}:** {value}")
+
     if detail.get("Plot") and detail["Plot"] != "N/A":
+        st.markdown("---")
+        st.subheader("Synopsis")
         st.write(detail["Plot"])
 
 
-def movies_by_era(movies: List[dict], median_year: Optional[int], era: str) -> List[dict]:
-    """Filter movies according to the selected release window."""
+if "director_choices" not in st.session_state:
+    directors = fetch_tmdb_people("Directing", count=20)
+    random.shuffle(directors)
+    st.session_state["director_choices"] = directors[:DIRECTOR_COUNT]
 
-    if not movies or median_year is None or era == "All releases":
-        return movies
-    if era.startswith("Older"):
-        return [
-            movie
-            for movie in movies
-            if movie.get("Year", "").isdigit()
-            and int(movie["Year"]) <= median_year
-        ]
-    if era.startswith("Newer"):
-        return [
-            movie
-            for movie in movies
-            if movie.get("Year", "").isdigit()
-            and int(movie["Year"]) > median_year
-        ]
-    return movies
+if "actor_choices" not in st.session_state:
+    actors = fetch_tmdb_people("Acting", count=40)
+    random.shuffle(actors)
+    st.session_state["actor_choices"] = actors[:ACTOR_COUNT]
 
+if "year_filter" not in st.session_state:
+    st.session_state["year_filter"] = "all"
 
-if "current_pick" not in st.session_state:
-    st.session_state["current_pick"] = None
-    st.session_state["current_pick_detail"] = None
-    st.session_state["current_pick_meta"] = None
+if "match_choice" not in st.session_state:
+    st.session_state["match_choice"] = None
 
-
-col1, col2, col3 = st.columns(3, gap="small")
+col1, col2, col3 = st.columns(3, gap="medium")
 
 with col1:
-    filter_type = st.radio("Type", ["Genre", "Actor", "Director"], key="filter_type")
+    st.subheader("Genres")
+    genre_choice = st.radio("Pick a genre", GENRES, key="genre_choice")
 
-if filter_type == "Genre":
-    choices = [
-        "Action",
-        "Adventure",
-        "Comedy",
-        "Drama",
-        "Horror",
-        "Sci-Fi",
-        "Romance",
-        "Thriller",
-    ]
-elif filter_type == "Actor":
-    ensure_api_key(TMDB_API_KEY, "TMDB_API_KEY")
-    choices = fetch_tmdb_people("Acting")
-else:
-    ensure_api_key(TMDB_API_KEY, "TMDB_API_KEY")
-    choices = fetch_tmdb_people("Directing")
+    st.divider()
+    st.subheader("Directors")
+    randomize_directors = st.button("🔀 Randomize directors")
+    if randomize_directors:
+        directors = fetch_tmdb_people("Directing", count=20)
+        random.shuffle(directors)
+        st.session_state["director_choices"] = directors[:DIRECTOR_COUNT]
+        st.session_state["director_radio"] = st.session_state["director_choices"][0]
 
-with col2:
-    selection = st.radio(
-        f"Select a {filter_type.lower()}",
-        choices,
-        key=f"selection_{filter_type.lower()}",
+    if "director_radio" not in st.session_state or st.session_state["director_radio"] not in st.session_state["director_choices"]:
+        st.session_state["director_radio"] = st.session_state["director_choices"][0]
+
+    director_choice = st.radio(
+        "Select a director",
+        st.session_state["director_choices"],
+        key="director_radio",
     )
 
-movies = search_movies(selection)
+with col2:
+    st.subheader("Actors")
+    randomize_actors = st.button("🔀 Randomize actors")
+    if randomize_actors:
+        actors = fetch_tmdb_people("Acting", count=40)
+        random.shuffle(actors)
+        st.session_state["actor_choices"] = actors[:ACTOR_COUNT]
+        for idx in range(ACTOR_COUNT):
+            st.session_state.pop(f"actor_cb_{idx}", None)
 
-years = []
-for movie in movies:
-    year = movie.get("Year", "")
-    if year.isdigit():
-        years.append(int(year))
-
-median_year = int(statistics.median(years)) if years else None
+    actor_columns = st.columns(4)
+    selected_actors: List[str] = []
+    for idx, actor in enumerate(st.session_state["actor_choices"]):
+        column = actor_columns[idx % len(actor_columns)]
+        with column:
+            if st.checkbox(actor, key=f"actor_cb_{idx}"):
+                selected_actors.append(actor)
 
 with col3:
-    if median_year is None:
-        era = "All releases"
-        st.markdown("**Release window**")
-        st.caption("More data is needed for year-based picks.")
-    else:
-        era_options = [
-            "All releases",
-            f"Older (≤ {median_year})",
-            f"Newer (> {median_year})",
-        ]
-        era = st.radio("Release window", era_options, key="release_window")
-    reroll = st.button("🎲 Surprise me", key="reroll")
+    st.subheader("Year")
+    st.number_input(
+        "Center year",
+        min_value=1900,
+        max_value=2100,
+        value=st.session_state.get("center_year", 2000),
+        step=1,
+        key="center_year",
+    )
 
-if median_year is not None:
-    st.caption(f"📅 Median release year for {selection}: {median_year}")
+    older_clicked = st.button("Older (≤ center)")
+    newer_clicked = st.button("Newer (> center)")
+    surprise_clicked = st.button("Surprise me")
 
-filtered_movies = movies_by_era(movies, median_year, era)
+    if older_clicked:
+        st.session_state["year_filter"] = "older"
+    if newer_clicked:
+        st.session_state["year_filter"] = "newer"
+    if surprise_clicked:
+        st.session_state["year_filter"] = random.choice(["all", "older", "newer"])
+        st.session_state["center_year"] = random.randint(1950, 2023)
 
-meta = (filter_type, selection, era)
-if st.session_state.get("current_pick_meta") != meta:
-    st.session_state["current_pick_meta"] = meta
-    st.session_state["current_pick"] = None
-    st.session_state["current_pick_detail"] = None
+year_filter = st.session_state.get("year_filter", "all")
+center_year = st.session_state.get("center_year", 2000)
 
-if reroll:
-    st.session_state["current_pick"] = None
-    st.session_state["current_pick_detail"] = None
 
-if not filtered_movies:
-    st.warning("No movies available for that combination right now.")
+def parse_year(value: str) -> Optional[int]:
+    match = re.search(r"(\d{4})", value or "")
+    return int(match.group(1)) if match else None
+
+
+def filter_by_year(detail: dict) -> bool:
+    year = parse_year(detail.get("Year", ""))
+    if year is None:
+        return True
+    if year_filter == "older":
+        return year <= center_year
+    if year_filter == "newer":
+        return year > center_year
+    return True
+
+
+def gather_candidates(terms: List[str]) -> List[dict]:
+    seen: Dict[str, dict] = {}
+    for term in terms:
+        if not term:
+            continue
+        for movie in search_movies(term):
+            imdb_id = movie.get("imdbID")
+            if imdb_id and imdb_id not in seen:
+                seen[imdb_id] = movie
+    return list(seen.values())
+
+
+def matches_selection() -> List[dict]:
+    query_terms = [genre_choice, director_choice] + selected_actors
+    candidates = gather_candidates(query_terms)
+    matches: List[dict] = []
+    for movie in candidates:
+        detail = fetch_movie_detail(movie.get("imdbID", ""))
+        if not detail:
+            continue
+        genre_text = detail.get("Genre", "")
+        director_text = detail.get("Director", "")
+        actors_text = detail.get("Actors", "")
+
+        if genre_choice.lower() not in genre_text.lower():
+            continue
+        if director_choice.lower() not in director_text.lower():
+            continue
+        if selected_actors and not all(actor.lower() in actors_text.lower() for actor in selected_actors):
+            continue
+        if not filter_by_year(detail):
+            continue
+
+        matches.append({"summary": movie, "detail": detail})
+        if len(matches) == 10:
+            break
+    return matches
+
+
+matches = matches_selection()
+
+st.divider()
+st.subheader("Matched Movies")
+
+if not matches:
+    st.info("No movies available for that combination right now.")
 else:
-    if st.session_state.get("current_pick") is None:
-        pick = random.choice(filtered_movies)
-        detail = fetch_movie_detail(pick["imdbID"])
-        if detail:
-            st.session_state["current_pick"] = pick
-            st.session_state["current_pick_detail"] = detail
-    detail = st.session_state.get("current_pick_detail")
-    if detail:
-        render_movie_detail(detail)
+    option_data = []
+    for index, entry in enumerate(matches, start=1):
+        detail = entry["detail"]
+        title = detail.get("Title", "Unknown Title")
+        year_text = detail.get("Year", "N/A")
+        rating = detail.get("imdbRating", "N/A")
+        label = f"{index}. {title} ({year_text}) — ⭐ {rating}"
+        option_data.append((label, detail))
+
+    labels = [label for label, _ in option_data]
+
+    if st.session_state.get("match_choice") not in labels:
+        st.session_state["match_choice"] = labels[0]
+
+    selected_label = st.radio(
+        "Select a movie to see the details",
+        labels,
+        key="match_choice",
+    )
+
+    selected_detail = next(detail for label, detail in option_data if label == selected_label)
+
+    render_movie_detail(selected_detail)
