@@ -147,7 +147,7 @@ def fetch_tmdb_movie_detail(movie_id: int) -> Optional[dict]:
 
 
 @st.cache_data(show_spinner=False)
-def discover_movies_for_genre(genre: str, max_pages: int = 5, max_movies: int = 120) -> List[dict]:
+def discover_movies_for_genre(genre: str, max_pages: int = 2, max_movies: int = 20) -> List[dict]:
     """Collect a TMDB-backed pool of movies for the selected genre."""
 
     genre_id = TMDB_GENRE_IDS.get(genre)
@@ -183,7 +183,8 @@ def discover_movies_for_genre(genre: str, max_pages: int = 5, max_movies: int = 
             if not imdb_id or imdb_id in seen_ids:
                 continue
 
-            if not detail.get("directors") or not detail.get("actors"):
+            # Keep if at least one director or one actor is known
+            if not detail.get("directors") and not detail.get("actors"):
                 continue
 
             seen_ids.add(imdb_id)
