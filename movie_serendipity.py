@@ -49,6 +49,20 @@ SEARCH_SEEDS = [
     "dream",
 ]
 
+GENRES = [
+    "Action",
+    "Adventure",
+    "Comedy",
+    "Drama",
+    "Horror",
+    "Sci-Fi",
+    "Romance",
+    "Thriller",
+]
+
+DIRECTOR_COUNT = 9
+ACTOR_COUNT = 20
+
 
 def get_secret(key: str) -> Optional[str]:
     """Fetch configuration values from Streamlit secrets or the environment."""
