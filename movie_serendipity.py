@@ -1,5 +1,6 @@
 # serendipity_v3.py
 import os
+import sqlite3
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import requests
@@ -8,6 +9,7 @@ import streamlit as st
 BASE_URL = "https://www.omdbapi.com/"
 TMDB_BASE_URL = "https://api.themoviedb.org/3"
 TMDB_IMAGE_BASE = "https://image.tmdb.org/t/p/w500"
+DB_PATH = "movies.sqlite"
 
 GENRES = [
     "Action",
@@ -27,6 +29,12 @@ GENRES = [
     "War",
     "Western",
 ]
+
+GENRE_DB_NAME_OVERRIDES: Dict[str, str] = {
+    "Sci-Fi": "Science Fiction",
+}
+
+DB_GENRE_TO_UI = {value: key for key, value in GENRE_DB_NAME_OVERRIDES.items()}
 
 TMDB_GENRE_IDS: Dict[str, int] = {
     "Action": 28,
@@ -147,56 +155,138 @@ def fetch_tmdb_movie_detail(movie_id: int) -> Optional[dict]:
 
 
 @st.cache_data(show_spinner=False)
-def discover_movies_for_genre(genre: str, max_pages: int = 2, max_movies: int = 20) -> List[dict]:
-    """Collect a TMDB-backed pool of movies for the selected genre."""
+def load_movies_for_genre_from_db(genre: str, limit: int = 120) -> List[dict]:
+    """Collect a pool of movies for the selected genre using the local database."""
 
-    genre_id = TMDB_GENRE_IDS.get(genre)
-    if not genre_id:
+    if genre not in TMDB_GENRE_IDS:
         return []
 
-    collected: List[dict] = []
-    seen_ids: Set[str] = set()
+    db_genre = GENRE_DB_NAME_OVERRIDES.get(genre, genre)
 
-    for page in range(1, max_pages + 1):
-        payload = tmdb_get(
-            "discover/movie",
-            params={
-                "with_genres": genre_id,
-                "page": page,
-                "include_adult": "false",
-                "sort_by": "popularity.desc",
-            },
+    try:
+        conn = sqlite3.connect(DB_PATH)
+    except sqlite3.Error:
+        st.error("Unable to open the local movie database. Ensure movies.sqlite exists.")
+        return []
+
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='movie_genres'"
         )
-        if not payload:
-            break
+        if not cur.fetchone():
+            st.warning(
+                "The movie database is missing genre information. Run the collection script "
+                "to populate the movie_genres table."
+            )
+            return []
 
-        for item in payload.get("results", []):
-            movie_id = item.get("id")
-            if not movie_id:
-                continue
+        cur.execute(
+            """
+            SELECT m.id, m.title, m.year, m.runtime, m.vote_average, m.overview
+            FROM movies m
+            JOIN movie_genres g ON m.id = g.movie_id
+            WHERE g.genre = ?
+            ORDER BY m.popularity DESC
+            LIMIT ?
+            """,
+            (db_genre, limit),
+        )
+        rows = cur.fetchall()
+        if not rows:
+            return []
 
-            detail = fetch_tmdb_movie_detail(int(movie_id))
-            if not detail:
-                continue
+        movie_ids = [row[0] for row in rows]
+        placeholders = ",".join("?" for _ in movie_ids)
+        directors_map: Dict[int, List[str]] = {movie_id: [] for movie_id in movie_ids}
+        actors_map: Dict[int, List[str]] = {movie_id: [] for movie_id in movie_ids}
 
-            imdb_id = detail.get("imdb_id")
-            if not imdb_id or imdb_id in seen_ids:
-                continue
+        if movie_ids:
+            cur.execute(
+                f"""
+                SELECT mp.movie_id, p.name
+                FROM movie_people mp
+                JOIN people p ON p.id = mp.person_id
+                WHERE mp.movie_id IN ({placeholders}) AND mp.role='Director'
+                ORDER BY p.name
+                """,
+                movie_ids,
+            )
+            for movie_id, name in cur.fetchall():
+                if name:
+                    directors_map[movie_id].append(name)
 
-            # Keep if at least one director or one actor is known
-            if not detail.get("directors") and not detail.get("actors"):
-                continue
+            cur.execute(
+                f"""
+                SELECT mp.movie_id, p.name
+                FROM movie_people mp
+                JOIN people p ON p.id = mp.person_id
+                WHERE mp.movie_id IN ({placeholders}) AND mp.role='Actor'
+                ORDER BY mp.rowid
+                """,
+                movie_ids,
+            )
+            for movie_id, name in cur.fetchall():
+                if name and len(actors_map[movie_id]) < 20:
+                    actors_map[movie_id].append(name)
 
-            seen_ids.add(imdb_id)
-            collected.append(detail)
-            if len(collected) >= max_movies:
-                return collected
+        collected: List[dict] = []
+        for movie_id, title, year, runtime, vote_average, overview in rows:
+            release_year = str(year) if year else ""
+            runtime_text = (
+                f"{runtime} min" if isinstance(runtime, int) and runtime and runtime > 0 else ""
+            )
+            collected.append(
+                {
+                    "tmdb_id": movie_id,
+                    "title": title or "Unknown Title",
+                    "release_year": release_year,
+                    "directors": directors_map.get(movie_id, []),
+                    "actors": actors_map.get(movie_id, []),
+                    "vote_average": float(vote_average or 0.0),
+                    "overview": overview or "",
+                    "poster_url": None,
+                    "runtime_text": runtime_text,
+                }
+            )
 
-        total_pages = payload.get("total_pages")
-        if isinstance(total_pages, int) and page >= total_pages:
-            break
+        return collected
+    finally:
+        conn.close()
 
-    return collected
+
+@st.cache_data(show_spinner=False)
+def load_available_genres() -> List[str]:
+    """Return the genres present in the local database, falling back to defaults."""
+
+    try:
+        conn = sqlite3.connect(DB_PATH)
+    except sqlite3.Error:
+        return GENRES
+
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='movie_genres'"
+        )
+        if not cur.fetchone():
+            return GENRES
+
+        cur.execute("SELECT DISTINCT genre FROM movie_genres ORDER BY genre")
+        rows = [row[0] for row in cur.fetchall() if row[0]]
+    finally:
+        conn.close()
+
+    if not rows:
+        return GENRES
+
+    ui_genres: List[str] = []
+    for genre_name in rows:
+        ui_name = DB_GENRE_TO_UI.get(genre_name, genre_name)
+        if ui_name in TMDB_GENRE_IDS and ui_name not in ui_genres:
+            ui_genres.append(ui_name)
+
+    return ui_genres or GENRES
 
 
 @st.cache_data(show_spinner=False)
@@ -351,9 +441,10 @@ col_genre, col_director, col_actor = st.columns(3, gap="large")
 
 with col_genre:
     st.subheader("Genres")
+    available_genres = load_available_genres()
     genre_choice = st.radio(
         "Pick a genre",
-        GENRES,
+        available_genres,
         index=None,
         key="genre_choice",
         on_change=reset_director_and_actor,
@@ -361,7 +452,7 @@ with col_genre:
 
 movies_for_genre: List[dict] = []
 if genre_choice:
-    movies_for_genre = discover_movies_for_genre(genre_choice)
+    movies_for_genre = load_movies_for_genre_from_db(genre_choice)
 
 with col_director:
     st.subheader("Directors")
@@ -370,8 +461,8 @@ with col_director:
         director_choice: Optional[str] = None
     elif not movies_for_genre:
         st.warning(
-            "We couldn't load any movies for that genre yet. Please verify your TMDB "
-            "API key or try a different genre."
+            "No locally stored movies found for that genre yet. Run the collection script "
+            "to gather more titles or pick a different genre."
         )
         director_choice = None
     else:
@@ -447,32 +538,21 @@ elif not matching_movies:
 else:
     options = []
     for index, movie in enumerate(matching_movies[:10], start=1):
-        omdb_detail = (
-            fetch_omdb_movie_detail(movie.get("imdb_id")) if movie.get("imdb_id") else None
+        title = movie.get("title", "Unknown Title")
+        year_text = movie.get("release_year", "N/A") or "N/A"
+        rating_value = movie.get("vote_average")
+        rating_text = (
+            f"{float(rating_value):.1f}"
+            if isinstance(rating_value, (int, float)) and float(rating_value) > 0
+            else "N/A"
         )
-        title = (
-            omdb_detail.get("Title")
-            if omdb_detail and omdb_detail.get("Title")
-            else movie.get("title", "Unknown Title")
-        )
-        year_text = (
-            omdb_detail.get("Year")
-            if omdb_detail and omdb_detail.get("Year")
-            else movie.get("release_year", "N/A")
-        )
-        if omdb_detail and omdb_detail.get("imdbRating") and omdb_detail["imdbRating"] != "N/A":
-            rating_text = omdb_detail["imdbRating"]
-        elif movie.get("vote_average"):
-            rating_text = f"{movie['vote_average']:.1f}"
-        else:
-            rating_text = "N/A"
         label = f"{index}. {title} ({year_text}) — ⭐ {rating_text}"
-        options.append((label, movie, omdb_detail))
+        options.append((label, movie))
 
     if not options:
         st.info("No movies available for the current combination. Try adjusting the actors.")
     else:
-        labels = [label for label, _, _ in options]
+        labels = [label for label, _ in options]
         if st.session_state.get("match_choice") not in labels:
             st.session_state["match_choice"] = labels[0]
 
@@ -482,7 +562,17 @@ else:
             key="match_choice",
         )
 
-        selected_movie, selected_omdb = next(
-            (movie, omdb) for label, movie, omdb in options if label == selected_label
+        selected_movie = next(
+            movie for label, movie in options if label == selected_label
         )
-        render_movie_detail(selected_movie, selected_omdb)
+        tmdb_detail = fetch_tmdb_movie_detail(selected_movie.get("tmdb_id"))
+        combined_movie = dict(selected_movie)
+        omdb_detail = None
+        if tmdb_detail:
+            for key, value in tmdb_detail.items():
+                if key not in combined_movie or not combined_movie[key]:
+                    combined_movie[key] = value
+            imdb_id = tmdb_detail.get("imdb_id")
+            if imdb_id:
+                omdb_detail = fetch_omdb_movie_detail(imdb_id)
+        render_movie_detail(combined_movie, omdb_detail)

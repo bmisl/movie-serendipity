@@ -64,6 +64,11 @@ def create_tables(conn):
         company_id INTEGER,
         PRIMARY KEY (movie_id, company_id)
     );
+    CREATE TABLE IF NOT EXISTS movie_genres (
+        movie_id INTEGER,
+        genre TEXT,
+        PRIMARY KEY (movie_id, genre)
+    );
     """)
     conn.commit()
 
@@ -123,22 +128,35 @@ def insert_companies(cur, movie_id, companies):
         cur.execute("INSERT OR REPLACE INTO movie_companies VALUES (?,?)",
                     (movie_id, c["id"]))
 
+def insert_genres(cur, movie_id, genres):
+    for g in genres or []:
+        name = g.get("name")
+        if name:
+            cur.execute("INSERT OR IGNORE INTO movie_genres VALUES (?,?)",
+                        (movie_id, name))
+
 def already_collected_ids(cur):
     cur.execute("SELECT id FROM movies")
-    return {row[0] for row in cur.fetchall()}
+    movies = {row[0] for row in cur.fetchall()}
+    cur.execute("SELECT DISTINCT movie_id FROM movie_genres")
+    with_genres = {row[0] for row in cur.fetchall()}
+    missing_genres = movies - with_genres
+    return movies, missing_genres
 
 def main():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     create_tables(conn)
 
-    collected = already_collected_ids(cur)
+    collected, missing_genres = already_collected_ids(cur)
     print(f"🗂  {len(collected)} movies already in database. Will skip those.\n")
+    if missing_genres:
+        print(f"ℹ️  {len(missing_genres)} movies are missing genre data and will be refreshed.\n")
 
     for year in range(2024, 2014, -1):
         print(f"📅 Collecting {year}...")
         movies = discover_movies_by_year(year)
-        to_fetch = [m for m in movies if m["id"] not in collected]
+        to_fetch = [m for m in movies if m["id"] not in collected or m["id"] in missing_genres]
 
         if not to_fetch:
             print(f"  ✅ All {year} movies already collected.")
@@ -151,7 +169,10 @@ def main():
             insert_movie(cur, detail)
             insert_people_and_links(cur, m["id"], detail.get("credits"))
             insert_companies(cur, m["id"], detail.get("production_companies"))
+            insert_genres(cur, m["id"], detail.get("genres"))
             conn.commit()
+            collected.add(m["id"])
+            missing_genres.discard(m["id"])
 
     conn.close()
     print("\n✅ Finished collecting TMDB data. Safe to rerun anytime — it resumes automatically.")
