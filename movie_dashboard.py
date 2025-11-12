@@ -54,14 +54,15 @@ def fetch_movie_detail(movie_id):
 
 # --- INSERT HELPERS ---
 def insert_movie(conn, m):
+    ensure_movie_columns(conn)
     conn.execute("""
-        INSERT OR IGNORE INTO movies 
-        (id,title,year,popularity,vote_average,vote_count,runtime,overview,collection_id,collection_name)
-        VALUES (?,?,?,?,?,?,?,?,?,?)
+        INSERT OR IGNORE INTO movies
+        (id,title,year,popularity,vote_average,vote_count,runtime,overview,poster_path,collection_id,collection_name)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)
     """, (
         m["id"], m["title"], m.get("release_date", "0000")[:4],
         m.get("popularity"), m.get("vote_average"), m.get("vote_count"),
-        m.get("runtime"), m.get("overview"),
+        m.get("runtime"), m.get("overview"), m.get("poster_path"),
         (m["belongs_to_collection"] or {}).get("id") if m.get("belongs_to_collection") else None,
         (m["belongs_to_collection"] or {}).get("name") if m.get("belongs_to_collection") else None
     ))
@@ -93,6 +94,13 @@ def insert_genres(conn, movie_id, genres):
     """)
     for g in genres:
         conn.execute("INSERT OR IGNORE INTO movie_genres VALUES (?, ?)", (movie_id, g["name"]))
+
+
+def ensure_movie_columns(conn):
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(movies)")}
+    if "poster_path" not in columns:
+        conn.execute("ALTER TABLE movies ADD COLUMN poster_path TEXT")
+        conn.commit()
 
 
 # --- UI ---
