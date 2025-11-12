@@ -1,6 +1,7 @@
 # serendipity_v3.py
 import os
 import sqlite3
+from collections import defaultdict
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import requests
@@ -204,6 +205,22 @@ def get_connection() -> sqlite3.Connection:
         raise
 
 
+def movie_table_has_column(column: str) -> bool:
+    """Return True when the movies table includes the requested column."""
+
+    try:
+        conn = get_connection()
+    except sqlite3.Error:
+        return False
+
+    try:
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(movies)")
+        return any(row[1] == column for row in cur.fetchall())
+    finally:
+        conn.close()
+
+
 @st.cache_data(show_spinner=False)
 def load_directors_for_genres(genres: Tuple[str, ...]) -> List[str]:
     """Return directors who have movies within the provided genres."""
@@ -354,12 +371,48 @@ def collect_people_for_movies(movie_ids: Sequence[int]) -> Tuple[Dict[int, List[
     return directors_map, actors_map
 
 
+def collect_genres_for_movies(movie_ids: Sequence[int]) -> Dict[int, List[str]]:
+    """Return the genres associated with each provided movie identifier."""
+
+    if not movie_ids:
+        return {}
+
+    try:
+        conn = get_connection()
+    except sqlite3.Error:
+        return {}
+
+    genres_map: Dict[int, List[str]] = defaultdict(list)
+
+    try:
+        cur = conn.cursor()
+        placeholders = ",".join("?" for _ in movie_ids)
+        cur.execute(
+            f"SELECT movie_id, genre FROM movie_genres WHERE movie_id IN ({placeholders})",
+            movie_ids,
+        )
+        for movie_id, genre in cur.fetchall():
+            if not genre:
+                continue
+            ui_genre = DB_GENRE_TO_UI.get(genre, genre)
+            if ui_genre not in genres_map[movie_id]:
+                genres_map[movie_id].append(ui_genre)
+    finally:
+        conn.close()
+
+    for values in genres_map.values():
+        values.sort()
+
+    return genres_map
+
+
 @st.cache_data(show_spinner=False)
 def fetch_movies_for_filters(
     genres: Tuple[str, ...],
     directors: Tuple[str, ...],
     actors: Tuple[str, ...],
     limit: int = 200,
+    include_poster_path: Optional[bool] = None,
 ) -> List[dict]:
     """Retrieve candidate movies scored by how well they match the filters."""
 
@@ -375,10 +428,23 @@ def fetch_movies_for_filters(
     try:
         cur = conn.cursor()
 
+        if include_poster_path is None:
+            include_poster_path = movie_table_has_column("poster_path")
+
+        poster_select = "m.poster_path" if include_poster_path else "NULL"
+
         if not db_genres and not director_names and not actor_names:
             cur.execute(
                 """
-                SELECT m.id, m.title, m.year, m.runtime, m.vote_average, m.overview, m.popularity
+                SELECT
+                    m.id,
+                    m.title,
+                    m.year,
+                    m.runtime,
+                    m.vote_average,
+                    m.overview,
+                    m.popularity,
+                    {poster_select} AS poster_path
                 FROM movies m
                 ORDER BY RANDOM()
                 LIMIT ?
@@ -388,8 +454,9 @@ def fetch_movies_for_filters(
             rows = cur.fetchall()
             movie_ids = [row[0] for row in rows]
             directors_map, actors_map = collect_people_for_movies(movie_ids)
+            genres_map = collect_genres_for_movies(movie_ids)
             return [
-                build_movie_payload(row, directors_map, actors_map, 0, 0, 0)
+                build_movie_payload(row, directors_map, actors_map, genres_map, 0, 0, 0)
                 for row in rows
             ]
 
@@ -456,6 +523,7 @@ def fetch_movies_for_filters(
                 m.vote_average,
                 m.overview,
                 m.popularity,
+                {poster_select} AS poster_path,
                 {genre_match_expr} AS genre_matches,
                 {director_match_expr} AS director_matches,
                 {actor_match_expr} AS actor_matches
@@ -473,8 +541,17 @@ def fetch_movies_for_filters(
 
         movie_ids = [row[0] for row in rows]
         directors_map, actors_map = collect_people_for_movies(movie_ids)
+        genres_map = collect_genres_for_movies(movie_ids)
         return [
-            build_movie_payload(row, directors_map, actors_map, row[7], row[8], row[9])
+            build_movie_payload(
+                row,
+                directors_map,
+                actors_map,
+                genres_map,
+                row[8],
+                row[9],
+                row[10],
+            )
             for row in rows
         ]
     finally:
@@ -485,13 +562,14 @@ def build_movie_payload(
     row: Tuple,
     directors_map: Dict[int, List[str]],
     actors_map: Dict[int, List[str]],
+    genres_map: Dict[int, List[str]],
     genre_matches: int,
     director_matches: int,
     actor_matches: int,
 ) -> dict:
     """Construct a movie payload with standardised fields and scoring metadata."""
 
-    movie_id, title, year, runtime, vote_average, overview, _popularity = row[:7]
+    movie_id, title, year, runtime, vote_average, overview, _popularity, poster_path = row[:8]
     release_year = str(year) if year else ""
     runtime_text = (
         f"{runtime} min" if isinstance(runtime, int) and runtime and runtime > 0 else ""
@@ -504,11 +582,13 @@ def build_movie_payload(
         "actors": actors_map.get(movie_id, []),
         "vote_average": float(vote_average or 0.0),
         "overview": overview or "",
-        "poster_url": None,
+        "poster_path": poster_path,
+        "poster_url": f"{TMDB_IMAGE_BASE}{poster_path}" if poster_path else None,
         "runtime_text": runtime_text,
         "genre_matches": int(genre_matches or 0),
         "director_matches": int(director_matches or 0),
         "actor_matches": int(actor_matches or 0),
+        "genres": genres_map.get(movie_id, []),
     }
 
 
@@ -534,6 +614,86 @@ def fetch_omdb_movie_detail(imdb_id: str) -> Optional[dict]:
     if detail.get("Type", "").lower() != "movie":
         return None
     return detail
+
+
+def parse_csv_list(value: Optional[str]) -> List[str]:
+    """Split a comma-separated string into a cleaned list of values."""
+
+    if not value:
+        return []
+    return [item.strip() for item in value.split(",") if item and item.strip()]
+
+
+def combine_unique_values(primary: Sequence[str], secondary: Sequence[str]) -> List[str]:
+    """Merge two sequences into a list without duplicates, preserving order."""
+
+    seen = set()
+    combined: List[str] = []
+
+    for source in (primary, secondary):
+        for item in source:
+            if not item:
+                continue
+            key = item.strip()
+            if not key:
+                continue
+            lowered = key.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            combined.append(key)
+
+    return combined
+
+
+def normalise_genre_name(name: str) -> Optional[str]:
+    """Convert a raw genre name to one of the UI filter labels when possible."""
+
+    cleaned = name.strip()
+    if not cleaned:
+        return None
+    if cleaned in TMDB_GENRE_IDS:
+        return cleaned
+    if cleaned in GENRES:
+        return cleaned
+    if cleaned in DB_GENRE_TO_UI:
+        return DB_GENRE_TO_UI[cleaned]
+    return None
+
+
+def add_filter_value(session_key: str, value: str) -> None:
+    """Append a value to a session-based filter list if it is not already present."""
+
+    selections = st.session_state.get(session_key, [])
+    if value in selections:
+        return
+    st.session_state[session_key] = [*selections, value]
+
+
+def render_filter_chips(
+    label: str,
+    chips: Sequence[str],
+    session_key: str,
+    prefix: str,
+) -> bool:
+    """Render clickable chips that add their value to the corresponding filters."""
+
+    values = [chip for chip in chips if chip]
+    if not values:
+        return False
+
+    st.markdown(f"**{label}:**")
+    columns = st.columns(min(len(values), 4))
+    for index, value in enumerate(values):
+        column = columns[index % len(columns)]
+        with column:
+            key = make_checkbox_key(f"{prefix}_chip", value)
+            if st.button(value, key=key, use_container_width=True):
+                add_filter_value(session_key, value)
+    if not st.session_state.get("_chips_caption_shown"):
+        st.caption("Tap a value to refine your filters.")
+        st.session_state["_chips_caption_shown"] = True
+    return True
 
 
 def render_movie_detail(movie: dict, omdb_detail: Optional[dict]) -> None:
@@ -575,25 +735,47 @@ def render_movie_detail(movie: dict, omdb_detail: Optional[dict]) -> None:
     elif movie.get("runtime_text"):
         runtime = movie["runtime_text"]
 
-    director_text = ""
-    if omdb_detail and omdb_detail.get("Director") and omdb_detail["Director"] != "N/A":
-        director_text = omdb_detail["Director"]
-    elif movie.get("directors"):
-        director_text = ", ".join(movie["directors"])
+    director_values = combine_unique_values(
+        movie.get("directors", []),
+        parse_csv_list(omdb_detail.get("Director")) if omdb_detail else [],
+    )
+    actor_values = combine_unique_values(
+        movie.get("actors", []),
+        parse_csv_list(omdb_detail.get("Actors")) if omdb_detail else [],
+    )
+    genre_values = combine_unique_values(
+        movie.get("genres", []),
+        parse_csv_list(omdb_detail.get("Genre")) if omdb_detail else [],
+    )
 
-    actors_text = ""
-    if omdb_detail and omdb_detail.get("Actors") and omdb_detail["Actors"] != "N/A":
-        actors_text = omdb_detail["Actors"]
-    elif movie.get("actors"):
-        actors_text = ", ".join(movie["actors"][:10])
+    recognised_genres: List[str] = []
+    display_only_genres: List[str] = []
+    for name in genre_values:
+        ui_name = normalise_genre_name(name)
+        if ui_name:
+            if ui_name not in recognised_genres:
+                recognised_genres.append(ui_name)
+        elif name not in display_only_genres:
+            display_only_genres.append(name)
+
+    if not render_filter_chips("Genres", recognised_genres, "selected_genres", "genre"):
+        if genre_values:
+            st.markdown(f"**Genres:** {', '.join(genre_values)}")
+    elif display_only_genres:
+        st.caption(", ".join(display_only_genres))
+
+    if not render_filter_chips("Directors", director_values, "selected_directors", "director"):
+        if director_values:
+            st.markdown(f"**Director:** {', '.join(director_values)}")
+
+    if not render_filter_chips("Actors", actor_values[:10], "selected_actors", "actor"):
+        if actor_values:
+            st.markdown(f"**Actors:** {', '.join(actor_values[:10])}")
 
     metadata: Dict[str, str] = {
-        "Genre": omdb_detail.get("Genre", "") if omdb_detail else "",
         "Runtime": runtime,
         "Rated": omdb_detail.get("Rated", "") if omdb_detail else "",
-        "Director": director_text,
         "Writer": omdb_detail.get("Writer", "") if omdb_detail else "",
-        "Actors": actors_text,
         "Awards": omdb_detail.get("Awards", "") if omdb_detail else "",
         "Box Office": omdb_detail.get("BoxOffice", "") if omdb_detail else "",
     }
@@ -622,6 +804,7 @@ def ensure_session_defaults() -> None:
             st.session_state[key] = []
     st.session_state.setdefault("director_search", "")
     st.session_state.setdefault("actor_search", "")
+    st.session_state.setdefault("_chips_caption_shown", False)
 
 
 def make_checkbox_key(prefix: str, name: str) -> str:
@@ -769,13 +952,20 @@ with actor_col:
 
 selected_actors = st.session_state["selected_actors"]
 
+poster_column_available = movie_table_has_column("poster_path")
 movies = fetch_movies_for_filters(
-    tuple(selected_genres), tuple(selected_directors), tuple(selected_actors), limit=200
+    tuple(selected_genres),
+    tuple(selected_directors),
+    tuple(selected_actors),
+    limit=200,
+    include_poster_path=poster_column_available,
 )
 
 used_random_fallback = False
 if not movies and (selected_genres or selected_directors or selected_actors):
-    movies = fetch_movies_for_filters(tuple(), tuple(), tuple(), limit=200)
+    movies = fetch_movies_for_filters(
+        tuple(), tuple(), tuple(), limit=200, include_poster_path=poster_column_available
+    )
     used_random_fallback = True
 
 def movie_score(movie: dict) -> Tuple[int, int, int, int, float]:
