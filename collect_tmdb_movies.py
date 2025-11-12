@@ -38,6 +38,7 @@ def create_tables(conn):
         vote_count INTEGER,
         runtime INTEGER,
         overview TEXT,
+        poster_path TEXT,
         collection_id INTEGER,
         collection_name TEXT
     );
@@ -70,7 +71,15 @@ def create_tables(conn):
         PRIMARY KEY (movie_id, genre)
     );
     """)
+    ensure_movie_columns(conn)
     conn.commit()
+
+
+def ensure_movie_columns(conn):
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(movies)")}
+    if "poster_path" not in columns:
+        conn.execute("ALTER TABLE movies ADD COLUMN poster_path TEXT")
+        conn.commit()
 
 def discover_movies_by_year(year, limit=150):
     """Get ~150 popular movies from TMDB for a given year."""
@@ -93,13 +102,13 @@ def fetch_movie_details(movie_id):
 
 def insert_movie(cur, m):
     cur.execute("""
-        INSERT OR REPLACE INTO movies 
-        (id,title,year,popularity,vote_average,vote_count,runtime,overview,collection_id,collection_name)
-        VALUES (?,?,?,?,?,?,?,?,?,?)
+        INSERT OR REPLACE INTO movies
+        (id,title,year,popularity,vote_average,vote_count,runtime,overview,poster_path,collection_id,collection_name)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)
     """, (
         m["id"], m["title"], m.get("release_date", "0000")[:4],
         m.get("popularity"), m.get("vote_average"), m.get("vote_count"),
-        m.get("runtime"), m.get("overview"),
+        m.get("runtime"), m.get("overview"), m.get("poster_path"),
         (m["belongs_to_collection"] or {}).get("id") if m.get("belongs_to_collection") else None,
         (m["belongs_to_collection"] or {}).get("name") if m.get("belongs_to_collection") else None
     ))
