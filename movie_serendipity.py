@@ -662,6 +662,15 @@ def normalise_genre_name(name: str) -> Optional[str]:
     return None
 
 
+def trigger_rerun() -> None:
+    """Request a Streamlit rerun using the supported API for the current version."""
+
+    if hasattr(st, "rerun"):
+        st.rerun()
+    elif hasattr(st, "experimental_rerun"):
+        st.experimental_rerun()
+
+
 def add_filter_value(session_key: str, value: str) -> None:
     """Append a value to a session-based filter list if it is not already present."""
 
@@ -670,7 +679,7 @@ def add_filter_value(session_key: str, value: str) -> None:
         return
     st.session_state[session_key] = [*selections, value]
     st.session_state["current_movie_id"] = None
-    st.experimental_rerun()
+    trigger_rerun()
 
 
 def render_filter_chips(
@@ -824,7 +833,7 @@ def remove_filter_value(session_key: str, value: str) -> None:
         return
     st.session_state[session_key] = [item for item in selections if item != value]
     st.session_state["current_movie_id"] = None
-    st.experimental_rerun()
+    trigger_rerun()
 
 
 def clear_all_filters() -> None:
@@ -833,7 +842,7 @@ def clear_all_filters() -> None:
     for key in ("selected_genres", "selected_directors", "selected_actors"):
         st.session_state[key] = []
     st.session_state["current_movie_id"] = None
-    st.experimental_rerun()
+    trigger_rerun()
 
 
 def render_filter_badges(label: str, session_key: str, column) -> None:
@@ -941,7 +950,7 @@ action_columns = st.columns([1, 1, 1])
 with action_columns[0]:
     if st.button("🔀 Surprise me", key="surprise_me"):
         st.session_state["current_movie_id"] = random.choice(movies)["tmdb_id"]
-        st.experimental_rerun()
+        trigger_rerun()
 with action_columns[1]:
     if st.button("🧹 Clear filters", key="clear_filters"):
         clear_all_filters()
@@ -997,7 +1006,7 @@ if recommended_movies:
                 use_container_width=True,
             ):
                 st.session_state["current_movie_id"] = movie["tmdb_id"]
-                st.experimental_rerun()
+                trigger_rerun()
 
             match_bits: List[str] = []
             if movie.get("director_matches"):
