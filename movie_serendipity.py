@@ -436,7 +436,7 @@ def fetch_movies_for_filters(
 
         if not db_genres and not director_names and not actor_names:
             cur.execute(
-                """
+                f"""
                 SELECT
                     m.id,
                     m.title,
