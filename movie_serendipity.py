@@ -475,6 +475,7 @@ def fetch_movies_for_filters(
                 f"{placeholders}"
                 "))"
             )
+            params.extend(db_genres)
             filters.append(
                 f"EXISTS (SELECT 1 FROM movie_genres mg WHERE mg.movie_id = m.id AND mg.genre IN ({placeholders}))"
             )
@@ -489,6 +490,7 @@ def fetch_movies_for_filters(
                 f"{placeholders}"
                 "))"
             )
+            params.extend(director_names)
             filters.append(
                 "EXISTS (SELECT 1 FROM movie_people md JOIN people pd ON pd.id = md.person_id "
                 "WHERE md.movie_id = m.id AND md.role = 'Director' AND pd.name IN ("
@@ -506,6 +508,7 @@ def fetch_movies_for_filters(
                 f"{placeholders}"
                 "))"
             )
+            params.extend(actor_names)
             filters.append(
                 "EXISTS (SELECT 1 FROM movie_people ma JOIN people pa ON pa.id = ma.person_id "
                 "WHERE ma.movie_id = m.id AND ma.role = 'Actor' AND pa.name IN ("
