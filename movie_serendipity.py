@@ -722,6 +722,94 @@ def use_value_from_movie(session_key: str, values: Sequence[str]) -> None:
     apply_filter_change(session_key, first_value)
 
 
+def parse_table_selection(widget_state: Optional[dict]) -> Tuple[Optional[int], Optional[str]]:
+    """Extract the first selected row index and column key from a dataframe widget."""
+
+    if not isinstance(widget_state, dict):
+        return None, None
+
+    selection = widget_state.get("selection")
+    row_index: Optional[int] = None
+    column_key: Optional[str] = None
+
+    def coerce_index(value: object) -> Optional[int]:
+        if isinstance(value, list):
+            for item in value:
+                coerced = coerce_index(item)
+                if coerced is not None:
+                    return coerced
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    if isinstance(selection, dict):
+        row_index = coerce_index(selection.get("rows")) or row_index
+        columns = selection.get("columns") or selection.get("cols")
+        if isinstance(columns, list) and columns:
+            column_key = str(columns[0])
+        elif isinstance(columns, str):
+            column_key = columns
+
+        active_cell = selection.get("active_cell") or selection.get("activeCell")
+        if isinstance(active_cell, dict):
+            row_index = coerce_index(active_cell.get("row")) or row_index
+            active_column = active_cell.get("column") or active_cell.get("col")
+            if active_column:
+                column_key = str(active_column)
+
+        cells = selection.get("cells") or selection.get("cell")
+        if isinstance(cells, list) and cells:
+            first_cell = cells[0]
+            if isinstance(first_cell, dict):
+                row_index = coerce_index(first_cell.get("row")) or row_index
+                cell_column = first_cell.get("column") or first_cell.get("col")
+                if cell_column:
+                    column_key = str(cell_column)
+
+    if row_index is None:
+        selected_rows = widget_state.get("selected_rows")
+        if isinstance(selected_rows, list) and selected_rows:
+            first_entry = selected_rows[0]
+            if isinstance(first_entry, dict):
+                row_index = coerce_index(first_entry.get("index")) or coerce_index(
+                    first_entry.get("row")
+                )
+            else:
+                row_index = coerce_index(first_entry)
+
+    return row_index, column_key
+
+
+def normalise_cell_value_for_filter(column: Optional[str], value: object) -> Optional[Tuple[str, str]]:
+    """Translate a table selection into a sidebar filter assignment."""
+
+    if not column or not isinstance(value, str):
+        return None
+
+    parts = [
+        part.strip()
+        for chunk in value.replace("\n", ",").split(",")
+        for part in [chunk]
+        if part.strip()
+    ]
+    if not parts:
+        return None
+
+    primary = parts[0]
+
+    if column == "Genres":
+        normalised = DB_GENRE_TO_UI.get(primary, primary)
+        return "filter_genre", normalised
+    if column == "Director":
+        return "filter_director", primary
+    if column == "Actors":
+        return "filter_actor", primary
+
+    return None
+
+
 def gather_movie_metadata(
     movie: dict, omdb_detail: Optional[dict]
 ) -> Tuple[List[str], List[str], List[str]]:
@@ -834,6 +922,7 @@ def render_filter_sidebar(
     current_movie_genres: Sequence[str],
     current_movie_directors: Sequence[str],
     current_movie_actors: Sequence[str],
+    table_selection: Optional[dict],
 ) -> None:
     """Render the slide-out sidebar controls for refining the movie list."""
 
@@ -843,6 +932,33 @@ def render_filter_sidebar(
 
         if st.button("🎲 Randomise filters", key="randomise_filters_sidebar"):
             randomise_filters()
+
+        selection_details: Optional[Tuple[str, str]] = None
+        selected_column = None
+        selected_value = None
+        if isinstance(table_selection, dict):
+            selected_column = table_selection.get("column")
+            selected_value = table_selection.get("value")
+            selection_details = normalise_cell_value_for_filter(selected_column, selected_value)
+
+        if selected_column and selected_value:
+            st.caption(f"Selected cell → {selected_column}: {selected_value}")
+        else:
+            st.caption("Select a table cell to reuse it as a filter.")
+
+        if st.button("Make selection a filter", key="apply_table_selection"):
+            if selection_details:
+                session_key, selection_value = selection_details
+                if session_key == "filter_genre" and selection_value not in genre_options:
+                    st.info("That genre is not available right now.")
+                elif session_key == "filter_director" and selection_value not in director_options:
+                    st.info("That director is not available right now.")
+                elif session_key == "filter_actor" and selection_value not in actor_options:
+                    st.info("That actor is not available right now.")
+                else:
+                    apply_filter_change(session_key, selection_value)
+            elif selected_column:
+                st.info("Choose a genre, director, or actor cell to apply it as a filter.")
 
         st.divider()
 
@@ -996,48 +1112,35 @@ def render_recommendation_table(
         hide_index=True,
         column_order=column_order,
         key=table_key,
+        on_select="rerun",
     )
 
     if not option_ids:
+        st.session_state.pop("table_selection_info", None)
         return None
 
     widget_state = st.session_state.get(table_key)
-    if not isinstance(widget_state, dict):
+    row_number, column_key = parse_table_selection(widget_state)
+
+    if row_number is None or row_number < 0 or row_number >= len(option_ids):
+        st.session_state.pop("table_selection_info", None)
         return None
 
-    selection = widget_state.get("selection", {})
-    row_entries = []
-    if isinstance(selection, dict):
-        row_entries = selection.get("rows") or []
-    if not row_entries:
-        row_entries = widget_state.get("selected_rows", []) or []
+    selected_row = table_rows[row_number]
+    selected_value = selected_row.get(column_key) if column_key else None
 
-    if not row_entries:
-        return None
-
-    first_entry = row_entries[0]
-    if isinstance(first_entry, dict):
-        row_index = first_entry.get("index")
-        if row_index is None:
-            row_index = first_entry.get("row")
-    else:
-        row_index = first_entry
-
-    try:
-        row_number = int(row_index)
-    except (TypeError, ValueError):
-        return None
-
-    if row_number < 0 or row_number >= len(option_ids):
-        return None
+    st.session_state["table_selection_info"] = {
+        "row": row_number,
+        "column": column_key,
+        "value": selected_value,
+        "movie_id": option_ids[row_number],
+    }
 
     return option_ids[row_number]
 
 
+    return option_ids[row_number]
 
-genre_filter = st.session_state.get("filter_genre")
-director_filter = st.session_state.get("filter_director")
-actor_filter = st.session_state.get("filter_actor")
 
 ensure_filter_defaults()
 
@@ -1156,6 +1259,7 @@ render_filter_sidebar(
     current_movie_genres,
     current_movie_directors,
     current_movie_actors,
+    st.session_state.get("table_selection_info"),
 )
 
 if used_random_fallback and (selected_genres or selected_directors or selected_actors):
