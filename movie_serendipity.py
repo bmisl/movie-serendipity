@@ -939,7 +939,6 @@ def render_recommendation_table(
 
     table_rows: List[Dict[str, str]] = []
     option_ids: List[int] = []
-    labels: Dict[int, str] = {}
 
     for movie in table_movies:
         movie_id = movie.get("tmdb_id")
@@ -949,9 +948,6 @@ def render_recommendation_table(
         option_ids.append(movie_id)
         title = movie.get("title", "Unknown Title")
         year_text = movie.get("release_year") or ""
-        display_year = year_text if year_text else "N/A"
-        labels[movie_id] = f"{title} ({display_year})"
-
         rating_value = movie.get("vote_average")
         rating_text = (
             f"{float(rating_value):.1f}"
@@ -992,32 +988,56 @@ def render_recommendation_table(
         "Matches",
     ]
 
+    table_key = "movie_recommendations_table"
     st.dataframe(
         table_rows,
         use_container_width=True,
         height=table_height,
         hide_index=True,
         column_order=column_order,
+        key=table_key,
     )
 
     if not option_ids:
         return None
 
-    current_id = current_movie.get("tmdb_id") if current_movie else None
-    default_index = option_ids.index(current_id) if current_id in option_ids else 0
+    widget_state = st.session_state.get(table_key)
+    if not isinstance(widget_state, dict):
+        return None
 
-    selected_id = st.selectbox(
-        "Select a movie from the list",
-        option_ids,
-        index=default_index,
-        format_func=lambda movie_id: labels.get(movie_id, str(movie_id)),
-        key="movie_table_selectbox",
-    )
+    selection = widget_state.get("selection", {})
+    row_entries = []
+    if isinstance(selection, dict):
+        row_entries = selection.get("rows") or []
+    if not row_entries:
+        row_entries = widget_state.get("selected_rows", []) or []
 
-    return selected_id
+    if not row_entries:
+        return None
+
+    first_entry = row_entries[0]
+    if isinstance(first_entry, dict):
+        row_index = first_entry.get("index")
+        if row_index is None:
+            row_index = first_entry.get("row")
+    else:
+        row_index = first_entry
+
+    try:
+        row_number = int(row_index)
+    except (TypeError, ValueError):
+        return None
+
+    if row_number < 0 or row_number >= len(option_ids):
+        return None
+
+    return option_ids[row_number]
 
 
 
+genre_filter = st.session_state.get("filter_genre")
+director_filter = st.session_state.get("filter_director")
+actor_filter = st.session_state.get("filter_actor")
 
 ensure_filter_defaults()
 
