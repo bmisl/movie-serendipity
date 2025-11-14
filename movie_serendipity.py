@@ -1035,6 +1035,9 @@ def render_recommendation_table(
 
 
 
+genre_filter = st.session_state.get("filter_genre")
+director_filter = st.session_state.get("filter_director")
+actor_filter = st.session_state.get("filter_actor")
 
 ensure_filter_defaults()
 
