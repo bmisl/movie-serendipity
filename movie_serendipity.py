@@ -3,7 +3,7 @@ import os
 import random
 import sqlite3
 from collections import defaultdict
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import requests
 import streamlit as st
@@ -292,15 +292,19 @@ def load_actors_for_filters(
         if director_names:
             placeholders = ",".join("?" for _ in director_names)
             filters.append(
-                f"EXISTS ("
-                "    SELECT 1"
-                "    FROM movie_people md"
-                "    JOIN people pd ON pd.id = md.person_id"
-                "    WHERE md.movie_id = m.id AND md.role = 'Director' AND pd.name IN ("
-                f"{placeholders}"
-                ")"
+                (
+                    "EXISTS ("
+                    " SELECT 1"
+                    " FROM movie_people md"
+                    " JOIN people pd ON pd.id = md.person_id"
+                    " WHERE md.movie_id = m.id AND md.role = 'Director' AND pd.name IN ("
+                    f"{placeholders}"
+                    ")"
+                    ")"
+                )
             )
             params.extend(director_names)
+
 
         where_clause = " AND ".join(filters)
         if where_clause:
@@ -738,11 +742,12 @@ def gather_movie_metadata(
     return genre_values, director_values, actor_values
 
 
-def render_movie_detail(movie: dict, omdb_detail: Optional[dict]) -> Tuple[
-    List[str],
-    List[str],
-    List[str],
-]:
+def render_movie_detail(
+    movie: dict,
+    omdb_detail: Optional[dict],
+    *,
+    on_surprise: Optional[Callable[[], None]] = None,
+) -> Tuple[List[str], List[str], List[str]]:
     """Display details for the selected movie using OMDb data with TMDB fallbacks."""
 
     poster_url: Optional[str] = None
@@ -770,11 +775,9 @@ def render_movie_detail(movie: dict, omdb_detail: Optional[dict]) -> Tuple[
     else:
         rating_value = "N/A"
 
-    runtime = ""
-    if omdb_detail and omdb_detail.get("Runtime") and omdb_detail["Runtime"] != "N/A":
-        runtime = omdb_detail["Runtime"]
-    elif movie.get("runtime_text"):
-        runtime = movie["runtime_text"]
+    rated_value = omdb_detail.get("Rated", "") if omdb_detail else ""
+    writer_value = omdb_detail.get("Writer", "") if omdb_detail else ""
+    awards_value = omdb_detail.get("Awards", "") if omdb_detail else ""
 
     synopsis = ""
     if omdb_detail and omdb_detail.get("Plot") and omdb_detail["Plot"] != "N/A":
@@ -791,31 +794,34 @@ def render_movie_detail(movie: dict, omdb_detail: Optional[dict]) -> Tuple[
             if poster_url:
                 st.image(poster_url, width=260)
         with layout_columns[1]:
-            st.markdown(f"### {title} ({year})")
-            st.markdown(f"**⭐ Rating:** {rating_value}")
-            if runtime:
-                st.markdown(f"**Runtime:** {runtime}")
-            if genre_values:
-                st.markdown(f"**Genres:** {', '.join(genre_values)}")
-            if director_values:
-                st.markdown(f"**Director:** {', '.join(director_values)}")
-            if actor_values:
-                st.markdown(f"**Actors:** {', '.join(actor_values[:10])}")
+            if on_surprise:
+                detail_sections = st.columns([6, 1])
+                detail_body = detail_sections[0]
+                with detail_sections[1]:
+                    if st.button("🔀 Surprise me", key="surprise_me", use_container_width=True):
+                        on_surprise()
+            else:
+                detail_body = st.container()
 
-            metadata: Dict[str, str] = {
-                "Rated": omdb_detail.get("Rated", "") if omdb_detail else "",
-                "Writer": omdb_detail.get("Writer", "") if omdb_detail else "",
-                "Awards": omdb_detail.get("Awards", "") if omdb_detail else "",
-                "Box Office": omdb_detail.get("BoxOffice", "") if omdb_detail else "",
-            }
+            with detail_body:
+                st.markdown(f"### {title} ({year})")
+                st.markdown(f"**⭐ Rating:** {rating_value}")
+                if genre_values:
+                    st.markdown(f"**Genres:** {', '.join(genre_values)}")
+                if director_values:
+                    st.markdown(f"**Director:** {', '.join(director_values)}")
+                if actor_values:
+                    st.markdown(f"**Actors:** {', '.join(actor_values[:10])}")
+                if rated_value and rated_value != "N/A":
+                    st.markdown(f"**Rated:** {rated_value}")
+                if writer_value and writer_value != "N/A":
+                    st.markdown(f"**Writer:** {writer_value}")
+                if awards_value and awards_value != "N/A":
+                    st.markdown(f"**Awards:** {awards_value}")
 
-            for label, value in metadata.items():
-                if value and value != "N/A":
-                    st.markdown(f"**{label}:** {value}")
 
         if synopsis:
-            st.markdown("---")
-            st.subheader("Synopsis")
+            st.markdown("**Synopsis**")
             st.write(synopsis)
 
     return genre_values, director_values, actor_values
@@ -852,13 +858,12 @@ def render_filter_sidebar(
         )
         apply_filter_change("filter_genre", None if genre_choice == "Any" else genre_choice)
 
-        st.button(
+        if st.button(
             "Use current movie genre",
             key="use_current_genre",
             disabled=not current_movie_genres,
-            on_click=use_value_from_movie,
-            kwargs={"session_key": "filter_genre", "values": current_movie_genres},
-        )
+        ):
+            use_value_from_movie("filter_genre", current_movie_genres)
 
         st.divider()
 
@@ -876,13 +881,12 @@ def render_filter_sidebar(
             "filter_director", None if director_choice == "Any" else director_choice
         )
 
-        st.button(
+        if st.button(
             "Use current movie director",
             key="use_current_director",
             disabled=not current_movie_directors,
-            on_click=use_value_from_movie,
-            kwargs={"session_key": "filter_director", "values": current_movie_directors},
-        )
+        ):
+            use_value_from_movie("filter_director", current_movie_directors)
 
         st.divider()
 
@@ -898,68 +902,121 @@ def render_filter_sidebar(
         )
         apply_filter_change("filter_actor", None if actor_choice == "Any" else actor_choice)
 
-        st.button(
+        if st.button(
             "Use current movie actor",
             key="use_current_actor",
             disabled=not current_movie_actors,
-            on_click=use_value_from_movie,
-            kwargs={"session_key": "filter_actor", "values": current_movie_actors},
+        ):
+            use_value_from_movie("filter_actor", current_movie_actors)
+
+
+def render_recommendation_table(
+    current_movie: dict,
+    movies: Sequence[dict],
+    *,
+    table_height: int = 420,
+) -> Optional[int]:
+    """Render a scrollable table of movie matches and return the chosen movie id."""
+
+    table_movies: List[dict] = []
+    seen_ids: set[int] = set()
+
+    if current_movie:
+        current_id = current_movie.get("tmdb_id")
+        if current_id is not None:
+            table_movies.append(current_movie)
+            seen_ids.add(current_id)
+
+    for movie in movies:
+        movie_id = movie.get("tmdb_id")
+        if movie_id is None or movie_id in seen_ids:
+            continue
+        table_movies.append(movie)
+        seen_ids.add(movie_id)
+
+    if not table_movies:
+        return None
+
+    table_rows: List[Dict[str, str]] = []
+    option_ids: List[int] = []
+    labels: Dict[int, str] = {}
+
+    for movie in table_movies:
+        movie_id = movie.get("tmdb_id")
+        if movie_id is None:
+            continue
+
+        option_ids.append(movie_id)
+        title = movie.get("title", "Unknown Title")
+        year_text = movie.get("release_year") or ""
+        display_year = year_text if year_text else "N/A"
+        labels[movie_id] = f"{title} ({display_year})"
+
+        rating_value = movie.get("vote_average")
+        rating_text = (
+            f"{float(rating_value):.1f}"
+            if isinstance(rating_value, (int, float)) and float(rating_value) > 0
+            else ""
         )
 
-        st.caption("Filters update the movie list below instantly.")
+        match_bits: List[str] = []
+        if movie.get("director_matches"):
+            match_bits.append(f"{movie['director_matches']} director")
+        if movie.get("actor_matches"):
+            match_bits.append(f"{movie['actor_matches']} actor")
+        if movie.get("genre_matches"):
+            match_bits.append(f"{movie['genre_matches']} genre")
+
+        row = {
+            "Status": "Current"
+            if current_movie and movie_id == current_movie.get("tmdb_id")
+            else "",
+            "Title": title,
+            "Year": year_text,
+            "Rating": rating_text,
+            "Genres": ", ".join(movie.get("genres", [])),
+            "Director": ", ".join(movie.get("directors", [])[:2]),
+            "Actors": ", ".join(movie.get("actors", [])[:3]),
+            "Matches": " / ".join(match_bits),
+        }
+        table_rows.append(row)
+
+    column_order = [
+        "Status",
+        "Title",
+        "Year",
+        "Rating",
+        "Genres",
+        "Director",
+        "Actors",
+        "Matches",
+    ]
+
+    st.dataframe(
+        table_rows,
+        use_container_width=True,
+        height=table_height,
+        hide_index=True,
+        column_order=column_order,
+    )
+
+    if not option_ids:
+        return None
+
+    current_id = current_movie.get("tmdb_id") if current_movie else None
+    default_index = option_ids.index(current_id) if current_id in option_ids else 0
+
+    selected_id = st.selectbox(
+        "Select a movie from the list",
+        option_ids,
+        index=default_index,
+        format_func=lambda movie_id: labels.get(movie_id, str(movie_id)),
+        key="movie_table_selectbox",
+    )
+
+    return selected_id
 
 
-def render_recommendation_list(movies: Sequence[dict]) -> None:
-    """Render the lower-half stacked list of additional movie suggestions."""
-
-    for index, movie in enumerate(movies):
-        row_container = st.container()
-        with row_container:
-            columns = st.columns([1, 5])
-            with columns[0]:
-                poster_url = movie.get("poster_url")
-                if poster_url:
-                    st.image(poster_url, width=95)
-            with columns[1]:
-                title = movie.get("title", "Unknown Title")
-                year_text = movie.get("release_year", "") or "N/A"
-                rating_value = movie.get("vote_average")
-                rating_text = (
-                    f"{float(rating_value):.1f}"
-                    if isinstance(rating_value, (int, float)) and float(rating_value) > 0
-                    else "N/A"
-                )
-                button_label = f"{title} ({year_text}) — ⭐ {rating_text}"
-                if st.button(
-                    button_label,
-                    key=f"stacked_{movie['tmdb_id']}",
-                    use_container_width=True,
-                ):
-                    st.session_state["current_movie_id"] = movie["tmdb_id"]
-                    trigger_rerun()
-
-                match_bits: List[str] = []
-                if movie.get("director_matches"):
-                    match_bits.append(f"{movie['director_matches']} director match")
-                if movie.get("actor_matches"):
-                    match_bits.append(f"{movie['actor_matches']} actor match")
-                if movie.get("genre_matches"):
-                    match_bits.append(f"{movie['genre_matches']} genre match")
-
-                if match_bits:
-                    st.caption(" • ".join(match_bits))
-                elif movie.get("genres"):
-                    st.caption(", ".join(movie["genres"]))
-
-                overview = movie.get("overview", "")
-                if overview:
-                    trimmed = overview.strip()
-                    if len(trimmed) > 220:
-                        trimmed = f"{trimmed[:217].rstrip()}…"
-                    st.write(trimmed)
-
-        if index < len(movies) - 1:
-            st.divider()
 
 
 ensure_filter_defaults()
@@ -1050,22 +1107,10 @@ if not current_movie:
     st.session_state["current_movie_id"] = current_movie["tmdb_id"]
     current_movie_id = current_movie["tmdb_id"]
 
-action_columns = st.columns([1, 2])
-with action_columns[0]:
-    if st.button("🔀 Surprise me", key="surprise_me"):
-        st.session_state["current_movie_id"] = random.choice(movies)["tmdb_id"]
-        trigger_rerun()
-with action_columns[1]:
-    if used_random_fallback:
-        st.caption("No exact matches yet — showing serendipitous picks instead.")
-    else:
-        st.caption("Open the sidebar to adjust your genre, director, or actor filters.")
-
-if used_random_fallback and (selected_genres or selected_directors or selected_actors):
-    st.info(
-        "We couldn't find matches for your current trail, so here are some random "
-        "discoveries instead."
-    )
+def handle_surprise() -> None:
+    source = movies_sorted if movies_sorted else movies
+    st.session_state["current_movie_id"] = random.choice(source)["tmdb_id"]
+    trigger_rerun()
 
 tmdb_detail = fetch_tmdb_movie_detail(current_movie.get("tmdb_id"))
 combined_movie = dict(current_movie)
@@ -1078,9 +1123,10 @@ if tmdb_detail:
     if imdb_id:
         omdb_detail = fetch_omdb_movie_detail(imdb_id)
 
-st.markdown("## Current Discovery")
 current_movie_genres, current_movie_directors, current_movie_actors = render_movie_detail(
-    combined_movie, omdb_detail
+    combined_movie,
+    omdb_detail,
+    on_surprise=handle_surprise,
 )
 
 render_filter_sidebar(
@@ -1092,13 +1138,18 @@ render_filter_sidebar(
     current_movie_actors,
 )
 
-recommended_movies = [
-    movie for movie in movies_sorted if movie.get("tmdb_id") != current_movie_id
-]
+if used_random_fallback and (selected_genres or selected_directors or selected_actors):
+    st.info(
+        "We couldn't find matches for your current trail, so here are some random "
+        "discoveries instead."
+    )
 
-if recommended_movies:
-    st.divider()
-    st.subheader("More movies to explore")
-    render_recommendation_list(recommended_movies)
-else:
+st.divider()
+selected_from_table = render_recommendation_table(current_movie, movies_sorted)
+
+if selected_from_table and selected_from_table != current_movie_id:
+    st.session_state["current_movie_id"] = selected_from_table
+    trigger_rerun()
+
+if len(movies_sorted) <= 1:
     st.caption("You're at the end of the trail for now — try a surprise pick above!")
