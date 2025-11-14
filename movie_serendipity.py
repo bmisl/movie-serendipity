@@ -1139,6 +1139,7 @@ def render_recommendation_table(
     return option_ids[row_number]
 
 
+    return option_ids[row_number]
 
 
 ensure_filter_defaults()
