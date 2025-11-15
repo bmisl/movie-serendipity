@@ -3,7 +3,7 @@ import os
 import random
 import sqlite3
 from collections import defaultdict
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import requests
 import streamlit as st
@@ -82,7 +82,6 @@ def ensure_api_key(key: Optional[str], label: str) -> str:
 
 
 st.set_page_config(layout="wide", initial_sidebar_state="collapsed")
-st.title("🎬 Serendipitous Movie Picker")
 
 ensure_api_key(OMDB_API_KEY, "OMDB_API_KEY")
 ensure_api_key(TMDB_API_KEY, "TMDB_API_KEY")
@@ -833,8 +832,6 @@ def gather_movie_metadata(
 def render_movie_detail(
     movie: dict,
     omdb_detail: Optional[dict],
-    *,
-    on_surprise: Optional[Callable[[], None]] = None,
 ) -> Tuple[List[str], List[str], List[str]]:
     """Display details for the selected movie using OMDb data with TMDB fallbacks."""
 
@@ -877,40 +874,32 @@ def render_movie_detail(
 
     detail_container = st.container()
     with detail_container:
-        layout_columns = st.columns([1, 2])
+        layout_columns = st.columns([1, 1.2, 1.8])
+
         with layout_columns[0]:
             if poster_url:
                 st.image(poster_url, width=260)
+
         with layout_columns[1]:
-            if on_surprise:
-                detail_sections = st.columns([6, 1])
-                detail_body = detail_sections[0]
-                with detail_sections[1]:
-                    if st.button("🔀 Surprise me", key="surprise_me", use_container_width=True):
-                        on_surprise()
-            else:
-                detail_body = st.container()
+            st.markdown(f"### {title} ({year})")
+            st.markdown(f"**⭐ Rating:** {rating_value}")
+            if genre_values:
+                st.markdown(f"**Genres:** {', '.join(genre_values)}")
+            if director_values:
+                st.markdown(f"**Director:** {', '.join(director_values)}")
+            if actor_values:
+                st.markdown(f"**Actors:** {', '.join(actor_values[:10])}")
+            if rated_value and rated_value != "N/A":
+                st.markdown(f"**Rated:** {rated_value}")
+            if writer_value and writer_value != "N/A":
+                st.markdown(f"**Writer:** {writer_value}")
+            if awards_value and awards_value != "N/A":
+                st.markdown(f"**Awards:** {awards_value}")
 
-            with detail_body:
-                st.markdown(f"### {title} ({year})")
-                st.markdown(f"**⭐ Rating:** {rating_value}")
-                if genre_values:
-                    st.markdown(f"**Genres:** {', '.join(genre_values)}")
-                if director_values:
-                    st.markdown(f"**Director:** {', '.join(director_values)}")
-                if actor_values:
-                    st.markdown(f"**Actors:** {', '.join(actor_values[:10])}")
-                if rated_value and rated_value != "N/A":
-                    st.markdown(f"**Rated:** {rated_value}")
-                if writer_value and writer_value != "N/A":
-                    st.markdown(f"**Writer:** {writer_value}")
-                if awards_value and awards_value != "N/A":
-                    st.markdown(f"**Awards:** {awards_value}")
-
-
-        if synopsis:
-            st.markdown("**Synopsis**")
-            st.write(synopsis)
+        with layout_columns[2]:
+            if synopsis:
+                st.markdown("**Synopsis**")
+                st.write(synopsis)
 
     return genre_values, director_values, actor_values
 
@@ -944,7 +933,7 @@ def render_filter_sidebar(
         if selected_column and selected_value:
             st.caption(f"Selected cell → {selected_column}: {selected_value}")
         else:
-            st.caption("Select a table cell to reuse it as a filter.")
+            st.caption("Select a Director or Actors cell in the table to reuse it as a filter.")
 
         if st.button("Make selection a filter", key="apply_table_selection"):
             if selection_details:
@@ -958,7 +947,7 @@ def render_filter_sidebar(
                 else:
                     apply_filter_change(session_key, selection_value)
             elif selected_column:
-                st.info("Choose a genre, director, or actor cell to apply it as a filter.")
+                st.info("Choose a Director or Actors cell to apply it as a filter.")
 
         st.divider()
 
@@ -1103,14 +1092,20 @@ def render_recommendation_table(
         "Actors",
         "Matches",
     ]
+    hidden_columns = {"Status", "Genres"}
+    display_rows = [
+        {key: value for key, value in row.items() if key not in hidden_columns}
+        for row in table_rows
+    ]
+    display_order = [col for col in column_order if col not in hidden_columns]
 
     table_key = "movie_recommendations_table"
     st.dataframe(
-        table_rows,
-        use_container_width=True,
+        display_rows,
+        width="stretch",
         height=table_height,
         hide_index=True,
-        column_order=column_order,
+        column_order=display_order,
         key=table_key,
         on_select="rerun",
     )
@@ -1119,6 +1114,9 @@ def render_recommendation_table(
         st.session_state.pop("table_selection_info", None)
         return None
 
+    column_lookup = {name: name for name in display_order}
+    column_lookup.update({str(index): name for index, name in enumerate(display_order)})
+
     widget_state = st.session_state.get(table_key)
     row_number, column_key = parse_table_selection(widget_state)
 
@@ -1126,12 +1124,19 @@ def render_recommendation_table(
         st.session_state.pop("table_selection_info", None)
         return None
 
-    selected_row = table_rows[row_number]
-    selected_value = selected_row.get(column_key) if column_key else None
+    column_name = column_lookup.get(column_key)
+    if column_name is None and column_key and column_key in display_order:
+        column_name = column_key
+
+    selected_value: Optional[object] = None
+    if column_name:
+        selected_row = display_rows[row_number]
+        selected_value = selected_row.get(column_name)
 
     st.session_state["table_selection_info"] = {
         "row": row_number,
-        "column": column_key,
+        "column": column_name,
+        "raw_column": column_key,
         "value": selected_value,
         "movie_id": option_ids[row_number],
     }
@@ -1230,11 +1235,6 @@ if not current_movie:
     st.session_state["current_movie_id"] = current_movie["tmdb_id"]
     current_movie_id = current_movie["tmdb_id"]
 
-def handle_surprise() -> None:
-    source = movies_sorted if movies_sorted else movies
-    st.session_state["current_movie_id"] = random.choice(source)["tmdb_id"]
-    trigger_rerun()
-
 tmdb_detail = fetch_tmdb_movie_detail(current_movie.get("tmdb_id"))
 combined_movie = dict(current_movie)
 omdb_detail = None
@@ -1249,7 +1249,6 @@ if tmdb_detail:
 current_movie_genres, current_movie_directors, current_movie_actors = render_movie_detail(
     combined_movie,
     omdb_detail,
-    on_surprise=handle_surprise,
 )
 
 render_filter_sidebar(
@@ -1276,4 +1275,4 @@ if selected_from_table and selected_from_table != current_movie_id:
     trigger_rerun()
 
 if len(movies_sorted) <= 1:
-    st.caption("You're at the end of the trail for now — try a surprise pick above!")
+    st.caption("You're at the end of the trail for now — adjust the filters for new matches.")
