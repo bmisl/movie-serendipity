@@ -22,6 +22,22 @@ REQUEST_TIMEOUT = 10
 REQUEST_DELAY = 0.25
 
 
+LANGUAGE_CODE_OVERRIDES = {
+    "dk": "da",
+    "dk-dk": "da",
+    "da-dk": "da",
+    "se": "sv",
+    "se-se": "sv",
+    "sv-se": "sv",
+    "no-no": "no",
+    "nb": "no",
+    "nb-no": "no",
+    "nn": "no",
+    "nn-no": "no",
+    "is-is": "is",
+}
+
+
 def resolve_api_key() -> str:
     """Load the TMDB API key from Streamlit secrets or the environment."""
 
@@ -63,6 +79,63 @@ def tmdb_get(path: str, params: Optional[Dict[str, object]] = None, retries: int
                 return {}
             time.sleep(REQUEST_DELAY * (attempt + 1))
     return {}
+
+
+def normalise_language_code(code: str) -> Optional[str]:
+    """Convert a user-supplied language into the ISO-639-1 code expected by TMDB."""
+
+    if not code:
+        return None
+
+    cleaned = code.strip().lower().replace("_", "-")
+    if not cleaned:
+        return None
+
+    override = LANGUAGE_CODE_OVERRIDES.get(cleaned)
+    if override:
+        return override
+
+    base = cleaned.split("-", 1)[0]
+    base = LANGUAGE_CODE_OVERRIDES.get(base, base)
+
+    if len(base) == 2 and base.isalpha():
+        return base
+
+    print(
+        f"⚠️  Ignoring invalid language code '{code}'. Use ISO-639-1 codes such as 'is' or 'is-IS'."
+    )
+    return None
+
+
+def prepare_spoken_languages(values: Sequence[str]) -> List[str]:
+    """Normalise and de-duplicate spoken language filters."""
+
+    codes: List[str] = []
+    seen: set[str] = set()
+    for value in values:
+        code = normalise_language_code(value)
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        codes.append(code)
+    return codes
+
+
+def movie_supports_languages(detail: dict, spoken_languages: Sequence[str]) -> bool:
+    """Return True when the TMDB payload matches at least one requested language."""
+
+    if not spoken_languages:
+        return True
+
+    spoken = detail.get("spoken_languages") or []
+    available = {
+        (entry.get("iso_639_1") or "").lower()
+        for entry in spoken
+        if entry and entry.get("iso_639_1")
+    }
+    normalised = {LANGUAGE_CODE_OVERRIDES.get(code, code) for code in available}
+    available.update(normalised)
+    return any(language in available for language in spoken_languages)
 
 
 def create_tables(conn: "sqlite3.Connection") -> None:
@@ -111,6 +184,12 @@ def create_tables(conn: "sqlite3.Connection") -> None:
         genre TEXT,
         PRIMARY KEY (movie_id, genre)
     );
+    CREATE TABLE IF NOT EXISTS movie_languages (
+        movie_id INTEGER,
+        language_code TEXT,
+        language_name TEXT,
+        PRIMARY KEY (movie_id, language_code)
+    );
     """
     )
     ensure_movie_columns(conn)
@@ -124,13 +203,16 @@ def ensure_movie_columns(conn: "sqlite3.Connection") -> None:
         conn.commit()
 
 
-def already_collected_ids(cur: "sqlite3.Cursor") -> Tuple[set, set]:
+def already_collected_ids(cur: "sqlite3.Cursor") -> Tuple[set, set, set]:
     cur.execute("SELECT id FROM movies")
     movies = {row[0] for row in cur.fetchall()}
     cur.execute("SELECT DISTINCT movie_id FROM movie_genres")
     with_genres = {row[0] for row in cur.fetchall()}
     missing_genres = movies - with_genres
-    return movies, missing_genres
+    cur.execute("SELECT DISTINCT movie_id FROM movie_languages")
+    with_languages = {row[0] for row in cur.fetchall()}
+    missing_languages = movies - with_languages
+    return movies, missing_genres, missing_languages
 
 
 def fetch_genre_map() -> Dict[str, int]:
@@ -206,7 +288,8 @@ def discover_movies(
     cast_ids: Sequence[int],
     crew_ids: Sequence[int],
     genre_ids: Sequence[int],
-    language: str,
+    metadata_language: str,
+    spoken_languages: Sequence[str],
     min_vote_average: Optional[float],
     min_vote_count: Optional[int],
 ) -> List[dict]:
@@ -221,7 +304,7 @@ def discover_movies(
             "sort_by": "popularity.desc",
             "include_adult": "false",
             "page": page,
-            "language": language,
+            "language": metadata_language,
         }
         if year:
             params["primary_release_year"] = year
@@ -231,6 +314,8 @@ def discover_movies(
             params["with_crew"] = ",".join(str(crew_id) for crew_id in crew_ids)
         if genre_ids:
             params["with_genres"] = ",".join(str(genre_id) for genre_id in genre_ids)
+        if spoken_languages:
+            params["with_spoken_languages"] = "|".join(spoken_languages)
         if min_vote_average is not None:
             params["vote_average.gte"] = min_vote_average
         if min_vote_count is not None:
@@ -249,10 +334,10 @@ def discover_movies(
     return movies[:limit]
 
 
-def fetch_movie_details(movie_id: int) -> dict:
+def fetch_movie_details(movie_id: int, metadata_language: str) -> dict:
     payload = tmdb_get(
         f"/movie/{movie_id}",
-        params={"append_to_response": "credits"},
+        params={"append_to_response": "credits", "language": metadata_language},
     )
     time.sleep(REQUEST_DELAY)
     return payload
@@ -357,6 +442,25 @@ def insert_genres(cur: "sqlite3.Cursor", movie_id: int, genres: Optional[Sequenc
             )
 
 
+def insert_languages(
+    cur: "sqlite3.Cursor", movie_id: int, languages: Optional[Sequence[dict]]
+) -> None:
+    for entry in languages or []:
+        code = (entry.get("iso_639_1") or "").strip().lower()
+        if not code:
+            continue
+        name = (
+            entry.get("english_name")
+            or entry.get("name")
+            or entry.get("iso_639_1")
+            or code
+        )
+        cur.execute(
+            "INSERT OR REPLACE INTO movie_languages VALUES (?,?,?)",
+            (movie_id, code, name),
+        )
+
+
 def determine_years(args: argparse.Namespace) -> List[int]:
     if args.year:
         unique_years = sorted({year for year in args.year if year}, reverse=True)
@@ -380,6 +484,12 @@ def describe_filters(args: argparse.Namespace, years: Sequence[int]) -> None:
         parts.append(f"Actors: {', '.join(args.actor)}")
     if args.director:
         parts.append(f"Directors: {', '.join(args.director)}")
+    if getattr(args, "metadata_language", None):
+        parts.append(f"Metadata locale: {args.metadata_language}")
+    if getattr(args, "spoken_language", None):
+        parts.append(
+            "Spoken languages: " + ", ".join(sorted(args.spoken_language))
+        )
     if args.min_rating is not None:
         parts.append(f"Min rating: {args.min_rating}")
     if args.min_vote_count is not None:
@@ -397,6 +507,9 @@ def parse_args() -> argparse.Namespace:
 
       Refresh thrillers directed by Denis Villeneuve since 2016:
         python collect_tmdb_movies.py --director "Denis Villeneuve" --genre Thriller --from-year 2024 --to-year 2016
+
+      Gather Nordic-language dramas released since 2015:
+        python collect_tmdb_movies.py --genre Drama --language is-IS --language da-DK --language sv-SE --language no-NO --from-year 2024 --to-year 2015
     """
 
     parser = argparse.ArgumentParser(
@@ -456,9 +569,20 @@ def parse_args() -> argparse.Namespace:
         help="Minimum TMDB vote count to include (helps avoid obscure titles).",
     )
     parser.add_argument(
-        "--language",
+        "--metadata-language",
         default="en-US",
-        help="Preferred language for metadata (default: en-US).",
+        help="Locale code used for translated metadata responses (default: en-US).",
+    )
+    parser.add_argument(
+        "--language",
+        "-L",
+        dest="spoken_language",
+        action="append",
+        help=(
+            "Restrict movies to those featuring the given spoken language. "
+            "Accepts ISO-639-1 codes such as 'is' or locale values like 'is-IS'. "
+            "Repeat the flag to require multiple languages."
+        ),
     )
     return parser.parse_args()
 
@@ -467,6 +591,14 @@ def main() -> None:
     import sqlite3
 
     args = parse_args()
+    raw_spoken = args.spoken_language or []
+    spoken_languages = prepare_spoken_languages(raw_spoken)
+    if raw_spoken and not spoken_languages:
+        print(
+            "⚠️  No valid language codes provided; proceeding without a spoken-language filter."
+        )
+    args.spoken_language = spoken_languages
+
     years = determine_years(args)
     if not years:
         print("⚠️  No years to query. Specify --year or a year range.")
@@ -488,11 +620,15 @@ def main() -> None:
     cur = conn.cursor()
     create_tables(conn)
 
-    collected, missing_genres = already_collected_ids(cur)
+    collected, missing_genres, missing_languages = already_collected_ids(cur)
     print(f"🗂  {len(collected)} movies already in database. Will skip those.\n")
     if missing_genres:
         print(
             f"ℹ️  {len(missing_genres)} movies are missing genre data and will be refreshed.\n"
+        )
+    if missing_languages:
+        print(
+            f"ℹ️  {len(missing_languages)} movies are missing spoken language data and will be refreshed.\n"
         )
 
     for year in years:
@@ -510,7 +646,8 @@ def main() -> None:
             cast_ids=cast_ids,
             crew_ids=crew_ids,
             genre_ids=genre_ids,
-            language=args.language,
+            metadata_language=args.metadata_language,
+            spoken_languages=args.spoken_language,
             min_vote_average=args.min_rating,
             min_vote_count=args.min_vote_count,
         )
@@ -518,7 +655,9 @@ def main() -> None:
         to_fetch = [
             movie
             for movie in candidates
-            if movie["id"] not in collected or movie["id"] in missing_genres
+            if movie["id"] not in collected
+            or movie["id"] in missing_genres
+            or movie["id"] in missing_languages
         ]
 
         if not to_fetch:
@@ -526,16 +665,26 @@ def main() -> None:
             continue
 
         for movie in tqdm(to_fetch, desc=f"  Fetching {year}", unit="movie"):
-            detail = fetch_movie_details(movie["id"])
+            detail = fetch_movie_details(movie["id"], args.metadata_language)
             if not detail:
+                continue
+            if args.spoken_language and not movie_supports_languages(
+                detail, args.spoken_language
+            ):
+                title = detail.get("title") or movie.get("title") or movie.get("name")
+                print(
+                    f"   ↪ Skipping {title or movie['id']} — missing requested spoken language."
+                )
                 continue
             insert_movie(cur, detail)
             insert_people_and_links(cur, movie["id"], detail.get("credits"))
             insert_companies(cur, movie["id"], detail.get("production_companies"))
             insert_genres(cur, movie["id"], detail.get("genres"))
+            insert_languages(cur, movie["id"], detail.get("spoken_languages"))
             conn.commit()
             collected.add(movie["id"])
             missing_genres.discard(movie["id"])
+            missing_languages.discard(movie["id"])
             if remaining is not None:
                 remaining -= 1
                 if remaining <= 0:
