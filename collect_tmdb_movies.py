@@ -121,7 +121,11 @@ def prepare_spoken_languages(values: Sequence[str]) -> List[str]:
     return codes
 
 
-def movie_supports_languages(detail: dict, spoken_languages: Sequence[str]) -> bool:
+def movie_supports_languages(
+    detail: dict,
+    spoken_languages: Sequence[str],
+    fallback_original: Optional[str] = None,
+) -> bool:
     """Return True when the TMDB payload matches at least one requested language."""
 
     if not spoken_languages:
@@ -133,6 +137,19 @@ def movie_supports_languages(detail: dict, spoken_languages: Sequence[str]) -> b
         for entry in spoken
         if entry and entry.get("iso_639_1")
     }
+
+    for candidate in (
+        detail.get("original_language"),
+        fallback_original,
+    ):
+        if not candidate:
+            continue
+        code = candidate.lower()
+        available.add(code)
+        override = LANGUAGE_CODE_OVERRIDES.get(code)
+        if override:
+            available.add(override)
+
     normalised = {LANGUAGE_CODE_OVERRIDES.get(code, code) for code in available}
     available.update(normalised)
     return any(language in available for language in spoken_languages)
@@ -213,6 +230,51 @@ def already_collected_ids(cur: "sqlite3.Cursor") -> Tuple[set, set, set]:
     with_languages = {row[0] for row in cur.fetchall()}
     missing_languages = movies - with_languages
     return movies, missing_genres, missing_languages
+
+
+def backfill_spoken_languages(
+    conn: "sqlite3.Connection",
+    cur: "sqlite3.Cursor",
+    missing_language_ids: Sequence[int],
+    metadata_language: str,
+) -> set[int]:
+    """Populate spoken-language metadata for movies collected before the new table."""
+
+    ids = sorted({movie_id for movie_id in missing_language_ids if movie_id})
+    if not ids:
+        return set()
+
+    print(
+        f"🛠️  Backfilling spoken languages for {len(ids)} existing movies so language filters work."
+    )
+
+    updated: set[int] = set()
+    batch = 0
+    for movie_id in tqdm(ids, desc="  Updating languages", unit="movie"):
+        detail = fetch_movie_details(movie_id, metadata_language)
+        if not detail:
+            continue
+
+        insert_languages(cur, movie_id, detail.get("spoken_languages"))
+        if detail.get("spoken_languages"):
+            updated.add(movie_id)
+
+        batch += 1
+        if batch % 25 == 0:
+            conn.commit()
+
+    conn.commit()
+
+    if updated:
+        print(f"  ✅ Recorded spoken languages for {len(updated)} movies.\n")
+
+    remaining = set(ids) - updated
+    if remaining:
+        print(
+            "  ⚠️  Some movies still lack language data on TMDB; they'll be refreshed if needed.\n"
+        )
+
+    return remaining
 
 
 def fetch_genre_map() -> Dict[str, int]:
@@ -299,6 +361,8 @@ def discover_movies(
 
     page = 1
     total_pages = 1
+    language_filter = "|".join(spoken_languages) if spoken_languages else None
+
     while len(movies) < limit and page <= total_pages:
         params: Dict[str, object] = {
             "sort_by": "popularity.desc",
@@ -314,8 +378,9 @@ def discover_movies(
             params["with_crew"] = ",".join(str(crew_id) for crew_id in crew_ids)
         if genre_ids:
             params["with_genres"] = ",".join(str(genre_id) for genre_id in genre_ids)
-        if spoken_languages:
-            params["with_spoken_languages"] = "|".join(spoken_languages)
+        if language_filter:
+            params["with_spoken_languages"] = language_filter
+            params["with_original_language"] = language_filter
         if min_vote_average is not None:
             params["vote_average.gte"] = min_vote_average
         if min_vote_count is not None:
@@ -488,7 +553,7 @@ def describe_filters(args: argparse.Namespace, years: Sequence[int]) -> None:
         parts.append(f"Metadata locale: {args.metadata_language}")
     if getattr(args, "spoken_language", None):
         parts.append(
-            "Spoken languages: " + ", ".join(sorted(args.spoken_language))
+            "Languages: " + ", ".join(sorted(args.spoken_language))
         )
     if args.min_rating is not None:
         parts.append(f"Min rating: {args.min_rating}")
@@ -579,9 +644,9 @@ def parse_args() -> argparse.Namespace:
         dest="spoken_language",
         action="append",
         help=(
-            "Restrict movies to those featuring the given spoken language. "
+            "Restrict movies to those featuring the given spoken or original language. "
             "Accepts ISO-639-1 codes such as 'is' or locale values like 'is-IS'. "
-            "Repeat the flag to require multiple languages."
+            "Repeat the flag to allow multiple languages."
         ),
     )
     return parser.parse_args()
@@ -622,6 +687,12 @@ def main() -> None:
 
     collected, missing_genres, missing_languages = already_collected_ids(cur)
     print(f"🗂  {len(collected)} movies already in database. Will skip those.\n")
+
+    if missing_languages:
+        missing_languages = backfill_spoken_languages(
+            conn, cur, missing_languages, args.metadata_language
+        )
+
     if missing_genres:
         print(
             f"ℹ️  {len(missing_genres)} movies are missing genre data and will be refreshed.\n"
@@ -669,11 +740,11 @@ def main() -> None:
             if not detail:
                 continue
             if args.spoken_language and not movie_supports_languages(
-                detail, args.spoken_language
+                detail, args.spoken_language, movie.get("original_language")
             ):
                 title = detail.get("title") or movie.get("title") or movie.get("name")
                 print(
-                    f"   ↪ Skipping {title or movie['id']} — missing requested spoken language."
+                    f"   ↪ Skipping {title or movie['id']} — language metadata does not match the requested filter."
                 )
                 continue
             insert_movie(cur, detail)
