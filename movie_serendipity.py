@@ -82,7 +82,6 @@ def ensure_api_key(key: Optional[str], label: str) -> str:
 
 
 st.set_page_config(layout="wide", initial_sidebar_state="collapsed")
-st.title("🎬 Serendipitous Movie Picker")
 
 ensure_api_key(OMDB_API_KEY, "OMDB_API_KEY")
 ensure_api_key(TMDB_API_KEY, "TMDB_API_KEY")
@@ -877,40 +876,39 @@ def render_movie_detail(
 
     detail_container = st.container()
     with detail_container:
-        layout_columns = st.columns([1, 2])
+        layout_columns = st.columns([1, 1.2, 1.8])
+
         with layout_columns[0]:
             if poster_url:
                 st.image(poster_url, width=260)
-        with layout_columns[1]:
             if on_surprise:
-                detail_sections = st.columns([6, 1])
-                detail_body = detail_sections[0]
-                with detail_sections[1]:
-                    if st.button("🔀 Surprise me", key="surprise_me", use_container_width=True):
-                        on_surprise()
-            else:
-                detail_body = st.container()
+                if st.button(
+                    "🔀 Surprise me",
+                    key="surprise_me",
+                    width="stretch",
+                ):
+                    on_surprise()
 
-            with detail_body:
-                st.markdown(f"### {title} ({year})")
-                st.markdown(f"**⭐ Rating:** {rating_value}")
-                if genre_values:
-                    st.markdown(f"**Genres:** {', '.join(genre_values)}")
-                if director_values:
-                    st.markdown(f"**Director:** {', '.join(director_values)}")
-                if actor_values:
-                    st.markdown(f"**Actors:** {', '.join(actor_values[:10])}")
-                if rated_value and rated_value != "N/A":
-                    st.markdown(f"**Rated:** {rated_value}")
-                if writer_value and writer_value != "N/A":
-                    st.markdown(f"**Writer:** {writer_value}")
-                if awards_value and awards_value != "N/A":
-                    st.markdown(f"**Awards:** {awards_value}")
+        with layout_columns[1]:
+            st.markdown(f"### {title} ({year})")
+            st.markdown(f"**⭐ Rating:** {rating_value}")
+            if genre_values:
+                st.markdown(f"**Genres:** {', '.join(genre_values)}")
+            if director_values:
+                st.markdown(f"**Director:** {', '.join(director_values)}")
+            if actor_values:
+                st.markdown(f"**Actors:** {', '.join(actor_values[:10])}")
+            if rated_value and rated_value != "N/A":
+                st.markdown(f"**Rated:** {rated_value}")
+            if writer_value and writer_value != "N/A":
+                st.markdown(f"**Writer:** {writer_value}")
+            if awards_value and awards_value != "N/A":
+                st.markdown(f"**Awards:** {awards_value}")
 
-
-        if synopsis:
-            st.markdown("**Synopsis**")
-            st.write(synopsis)
+        with layout_columns[2]:
+            if synopsis:
+                st.markdown("**Synopsis**")
+                st.write(synopsis)
 
     return genre_values, director_values, actor_values
 
@@ -1103,14 +1101,20 @@ def render_recommendation_table(
         "Actors",
         "Matches",
     ]
+    hidden_columns = {"Status", "Genres"}
+    display_rows = [
+        {key: value for key, value in row.items() if key not in hidden_columns}
+        for row in table_rows
+    ]
+    display_order = [col for col in column_order if col not in hidden_columns]
 
     table_key = "movie_recommendations_table"
     st.dataframe(
-        table_rows,
-        use_container_width=True,
+        display_rows,
+        width="stretch",
         height=table_height,
         hide_index=True,
-        column_order=column_order,
+        column_order=display_order,
         key=table_key,
         on_select="rerun",
     )
