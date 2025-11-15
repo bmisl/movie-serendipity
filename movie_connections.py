@@ -2,19 +2,71 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from collections import defaultdict, deque
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
+import requests
 import streamlit as st
 
 DB_PATH = "movies.sqlite"
+BASE_URL = "https://www.omdbapi.com/"
 
 st.set_page_config(
     page_title="Filmography Connection Explorer",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
+
+
+def get_secret(key: str) -> Optional[str]:
+    """Fetch configuration values from Streamlit secrets or the environment."""
+
+    if hasattr(st, "secrets") and key in st.secrets:
+        return st.secrets[key]
+    return os.getenv(key)
+
+
+def ensure_api_key(key: Optional[str], label: str) -> str:
+    """Stop execution with a helpful message when a required key is missing."""
+
+    if not key:
+        st.error(
+            f"Missing {label}. Add it to Streamlit secrets or set the {label} environment variable."
+        )
+        st.stop()
+    return key
+
+
+OMDB_API_KEY = ensure_api_key(get_secret("OMDB_API_KEY"), "OMDB_API_KEY")
+
+
+@st.cache_data(show_spinner=False)
+def fetch_omdb_poster(imdb_id: Optional[str]) -> Optional[str]:
+    """Return the OMDb poster URL for the supplied IMDb identifier."""
+
+    if not imdb_id:
+        return None
+
+    try:
+        response = requests.get(
+            BASE_URL,
+            params={"i": imdb_id, "apikey": OMDB_API_KEY},
+            timeout=10,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except requests.RequestException:
+        return None
+
+    if payload.get("Response") != "True":
+        return None
+
+    poster_url = payload.get("Poster")
+    if poster_url and poster_url != "N/A":
+        return poster_url
+    return None
 
 
 @st.cache_data(show_spinner=False)
@@ -35,6 +87,7 @@ def load_graph_data() -> Tuple[
             m.id AS movie_id,
             m.title AS movie_title,
             m.year AS movie_year,
+            m.imdb_id AS movie_imdb_id,
             p.id AS person_id,
             p.name AS person_name,
             mp.role AS role
@@ -69,6 +122,7 @@ def load_graph_data() -> Tuple[
             movie_details[movie_id] = {
                 "title": row["movie_title"] or "Untitled",
                 "year": str(year_value) if year_value else "",
+                "imdb_id": row["movie_imdb_id"],
             }
 
         person_to_movies[person_id].add(movie_id)
@@ -277,6 +331,24 @@ def render_path(
 
     dot = build_graphviz(path, person_details, movie_details)
     st.graphviz_chart(dot, width="stretch")
+
+    movie_nodes = [node_id for node_type, node_id in path if node_type == "movie"]
+    if movie_nodes:
+        st.markdown("**Posters along the path**")
+        poster_columns = st.columns(len(movie_nodes))
+        for column, movie_id in zip(poster_columns, movie_nodes):
+            details = movie_details.get(movie_id, {})
+            poster_url = details.get("omdb_poster")
+            if poster_url is None:
+                imdb_id = details.get("imdb_id")
+                poster_url = fetch_omdb_poster(imdb_id)
+                details["omdb_poster"] = poster_url
+
+            caption = format_movie(movie_id, movie_details)
+            if poster_url:
+                column.image(poster_url, use_column_width=True, caption=caption)
+            else:
+                column.markdown(f"**{caption}**\n\nPoster unavailable.")
 
     st.markdown("**Chain**")
     for step in describe_connection(path, person_details, movie_details, edge_roles):
