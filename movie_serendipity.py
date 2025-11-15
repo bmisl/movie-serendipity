@@ -3,7 +3,7 @@ import os
 import random
 import sqlite3
 from collections import defaultdict
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import requests
 import streamlit as st
@@ -82,7 +82,6 @@ def ensure_api_key(key: Optional[str], label: str) -> str:
 
 
 st.set_page_config(layout="wide", initial_sidebar_state="collapsed")
-st.title("🎬 Serendipitous Movie Picker")
 
 ensure_api_key(OMDB_API_KEY, "OMDB_API_KEY")
 ensure_api_key(TMDB_API_KEY, "TMDB_API_KEY")
@@ -672,8 +671,43 @@ def pick_random_value(values: Sequence[str]) -> Optional[str]:
     return random.choice(valid)
 
 
+def normalise_actor_selection(values: Optional[Sequence[str]]) -> List[str]:
+    """Return a cleaned, de-duplicated list of actor names."""
+
+    if not values:
+        return []
+
+    cleaned: List[str] = []
+    seen: set[str] = set()
+    for raw in values:
+        if not isinstance(raw, str):
+            continue
+        candidate = raw.strip()
+        if not candidate:
+            continue
+        lowered = candidate.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        cleaned.append(candidate)
+    return cleaned
+
+
+def get_actor_filter_values() -> List[str]:
+    """Fetch the current actor filter values as a normalised list."""
+
+    raw = st.session_state.get("filter_actor")
+    if isinstance(raw, str):
+        source: Sequence[str] = [raw]
+    elif isinstance(raw, (list, tuple)):
+        source = [value for value in raw if isinstance(value, str)]
+    else:
+        source = []
+    return normalise_actor_selection(source)
+
+
 def ensure_filter_defaults() -> None:
-    """Initialise the single-value filters with random defaults."""
+    """Initialise the filters with sensible defaults."""
 
     if "filter_genre" not in st.session_state:
         st.session_state["filter_genre"] = pick_random_value(load_available_genres())
@@ -682,44 +716,45 @@ def ensure_filter_defaults() -> None:
             load_directors_for_genres(tuple())
         )
     if "filter_actor" not in st.session_state:
-        st.session_state["filter_actor"] = pick_random_value(
-            load_actors_for_filters(tuple(), tuple())
-        )
+        default_actor = pick_random_value(load_actors_for_filters(tuple(), tuple()))
+        st.session_state["filter_actor"] = [default_actor] if default_actor else []
+    else:
+        st.session_state["filter_actor"] = get_actor_filter_values()
+
+    st.session_state.setdefault("actor_filter_widget", list(get_actor_filter_values()))
     st.session_state.setdefault("current_movie_id", None)
 
 
-def randomise_filters() -> None:
-    """Replace every active filter with a fresh random value."""
-
-    st.session_state["filter_genre"] = pick_random_value(load_available_genres())
-    st.session_state["filter_director"] = pick_random_value(
-        load_directors_for_genres(tuple())
-    )
-    st.session_state["filter_actor"] = pick_random_value(
-        load_actors_for_filters(tuple(), tuple())
-    )
-    st.session_state["current_movie_id"] = None
-    trigger_rerun()
-
-
-def apply_filter_change(session_key: str, value: Optional[str]) -> None:
+def apply_filter_change(session_key: str, value: object) -> None:
     """Persist a new filter value and refresh the recommendations."""
+
+    if session_key == "filter_actor":
+        if value is None:
+            new_values: List[str] = []
+        elif isinstance(value, str):
+            new_values = normalise_actor_selection([value])
+        elif isinstance(value, (list, tuple)):
+            items = [item for item in value if isinstance(item, str)]
+            new_values = normalise_actor_selection(items)
+        else:
+            new_values = []
+
+        current_values = get_actor_filter_values()
+        if new_values == current_values:
+            return
+
+        st.session_state["filter_actor"] = new_values
+        st.session_state["actor_filter_widget"] = list(new_values)
+        st.session_state["current_movie_id"] = None
+        trigger_rerun()
+        return
 
     if st.session_state.get(session_key) == value:
         return
+
     st.session_state[session_key] = value
     st.session_state["current_movie_id"] = None
     trigger_rerun()
-
-
-def use_value_from_movie(session_key: str, values: Sequence[str]) -> None:
-    """Pull the first available value from the current movie into a filter."""
-
-    first_value = next((item for item in values if item), None)
-    if not first_value:
-        st.warning("The current movie does not have a value for this filter yet.")
-        return
-    apply_filter_change(session_key, first_value)
 
 
 def parse_table_selection(widget_state: Optional[dict]) -> Tuple[Optional[int], Optional[str]]:
@@ -833,8 +868,6 @@ def gather_movie_metadata(
 def render_movie_detail(
     movie: dict,
     omdb_detail: Optional[dict],
-    *,
-    on_surprise: Optional[Callable[[], None]] = None,
 ) -> Tuple[List[str], List[str], List[str]]:
     """Display details for the selected movie using OMDb data with TMDB fallbacks."""
 
@@ -877,40 +910,32 @@ def render_movie_detail(
 
     detail_container = st.container()
     with detail_container:
-        layout_columns = st.columns([1, 2])
+        layout_columns = st.columns([1, 1.2, 1.8])
+
         with layout_columns[0]:
             if poster_url:
                 st.image(poster_url, width=260)
+
         with layout_columns[1]:
-            if on_surprise:
-                detail_sections = st.columns([6, 1])
-                detail_body = detail_sections[0]
-                with detail_sections[1]:
-                    if st.button("🔀 Surprise me", key="surprise_me", use_container_width=True):
-                        on_surprise()
-            else:
-                detail_body = st.container()
+            st.markdown(f"### {title} ({year})")
+            st.markdown(f"**⭐ Rating:** {rating_value}")
+            if genre_values:
+                st.markdown(f"**Genres:** {', '.join(genre_values)}")
+            if director_values:
+                st.markdown(f"**Director:** {', '.join(director_values)}")
+            if actor_values:
+                st.markdown(f"**Actors:** {', '.join(actor_values[:10])}")
+            if rated_value and rated_value != "N/A":
+                st.markdown(f"**Rated:** {rated_value}")
+            if writer_value and writer_value != "N/A":
+                st.markdown(f"**Writer:** {writer_value}")
+            if awards_value and awards_value != "N/A":
+                st.markdown(f"**Awards:** {awards_value}")
 
-            with detail_body:
-                st.markdown(f"### {title} ({year})")
-                st.markdown(f"**⭐ Rating:** {rating_value}")
-                if genre_values:
-                    st.markdown(f"**Genres:** {', '.join(genre_values)}")
-                if director_values:
-                    st.markdown(f"**Director:** {', '.join(director_values)}")
-                if actor_values:
-                    st.markdown(f"**Actors:** {', '.join(actor_values[:10])}")
-                if rated_value and rated_value != "N/A":
-                    st.markdown(f"**Rated:** {rated_value}")
-                if writer_value and writer_value != "N/A":
-                    st.markdown(f"**Writer:** {writer_value}")
-                if awards_value and awards_value != "N/A":
-                    st.markdown(f"**Awards:** {awards_value}")
-
-
-        if synopsis:
-            st.markdown("**Synopsis**")
-            st.write(synopsis)
+        with layout_columns[2]:
+            if synopsis:
+                st.markdown("**Synopsis**")
+                st.write(synopsis)
 
     return genre_values, director_values, actor_values
 
@@ -930,35 +955,51 @@ def render_filter_sidebar(
         st.header("Discovery filters")
         st.caption("Pick a genre, director, or actor to reshape your matches.")
 
-        if st.button("🎲 Randomise filters", key="randomise_filters_sidebar"):
-            randomise_filters()
-
         selection_details: Optional[Tuple[str, str]] = None
         selected_column = None
         selected_value = None
+        selection_signature: Optional[Tuple[object, Optional[str], Optional[str]]] = None
         if isinstance(table_selection, dict):
             selected_column = table_selection.get("column")
             selected_value = table_selection.get("value")
             selection_details = normalise_cell_value_for_filter(selected_column, selected_value)
+            if selection_details:
+                selection_signature = (
+                    table_selection.get("movie_id"),
+                    selection_details[0],
+                    selection_details[1],
+                )
 
         if selected_column and selected_value:
             st.caption(f"Selected cell → {selected_column}: {selected_value}")
         else:
-            st.caption("Select a table cell to reuse it as a filter.")
+            st.caption("Select a Director or Actors cell in the table to reuse it as a filter.")
 
-        if st.button("Make selection a filter", key="apply_table_selection"):
-            if selection_details:
+        if selection_details and selection_signature:
+            last_signature = st.session_state.get("last_applied_selection")
+            if selection_signature != last_signature:
                 session_key, selection_value = selection_details
-                if session_key == "filter_genre" and selection_value not in genre_options:
-                    st.info("That genre is not available right now.")
-                elif session_key == "filter_director" and selection_value not in director_options:
-                    st.info("That director is not available right now.")
-                elif session_key == "filter_actor" and selection_value not in actor_options:
-                    st.info("That actor is not available right now.")
-                else:
-                    apply_filter_change(session_key, selection_value)
-            elif selected_column:
-                st.info("Choose a genre, director, or actor cell to apply it as a filter.")
+                if session_key == "filter_genre":
+                    if selection_value in genre_options:
+                        st.session_state["last_applied_selection"] = selection_signature
+                        apply_filter_change(session_key, selection_value)
+                    else:
+                        st.info("That genre is not available right now.")
+                elif session_key == "filter_director":
+                    if selection_value in director_options:
+                        st.session_state["last_applied_selection"] = selection_signature
+                        apply_filter_change(session_key, selection_value)
+                    else:
+                        st.info("That director is not available right now.")
+                elif session_key == "filter_actor":
+                    actor_values = get_actor_filter_values()
+                    if selection_value not in actor_options:
+                        st.info("That actor is not available right now.")
+                    elif selection_value not in actor_values:
+                        st.session_state["last_applied_selection"] = selection_signature
+                        apply_filter_change(session_key, actor_values + [selection_value])
+        else:
+            st.session_state.pop("last_applied_selection", None)
 
         st.divider()
 
@@ -972,14 +1013,10 @@ def render_filter_sidebar(
             genre_display,
             index=genre_display.index(genre_label),
         )
-        apply_filter_change("filter_genre", None if genre_choice == "Any" else genre_choice)
-
-        if st.button(
-            "Use current movie genre",
-            key="use_current_genre",
-            disabled=not current_movie_genres,
-        ):
-            use_value_from_movie("filter_genre", current_movie_genres)
+        new_genre_value = None if genre_choice == "Any" else genre_choice
+        if new_genre_value != current_genre:
+            st.session_state.pop("last_applied_selection", None)
+        apply_filter_change("filter_genre", new_genre_value)
 
         st.divider()
 
@@ -993,37 +1030,37 @@ def render_filter_sidebar(
             director_display,
             index=director_display.index(director_label),
         )
-        apply_filter_change(
-            "filter_director", None if director_choice == "Any" else director_choice
-        )
-
-        if st.button(
-            "Use current movie director",
-            key="use_current_director",
-            disabled=not current_movie_directors,
-        ):
-            use_value_from_movie("filter_director", current_movie_directors)
+        new_director_value = None if director_choice == "Any" else director_choice
+        if new_director_value != current_director:
+            st.session_state.pop("last_applied_selection", None)
+        apply_filter_change("filter_director", new_director_value)
 
         st.divider()
 
-        current_actor = st.session_state.get("filter_actor")
-        actor_display = ["Any", *actor_options]
-        actor_label = current_actor if current_actor else "Any"
-        if actor_label not in actor_display:
-            actor_label = "Any"
-        actor_choice = st.selectbox(
-            "Actor",
-            actor_display,
-            index=actor_display.index(actor_label),
-        )
-        apply_filter_change("filter_actor", None if actor_choice == "Any" else actor_choice)
+        current_actor_values = get_actor_filter_values()
+        actor_widget_key = "actor_filter_widget"
+        existing_widget_value = st.session_state.get(actor_widget_key)
+        if isinstance(existing_widget_value, list):
+            normalised_widget = normalise_actor_selection(existing_widget_value)
+        elif isinstance(existing_widget_value, tuple):
+            normalised_widget = normalise_actor_selection(list(existing_widget_value))
+        elif isinstance(existing_widget_value, str):
+            normalised_widget = normalise_actor_selection([existing_widget_value])
+        else:
+            normalised_widget = []
 
-        if st.button(
-            "Use current movie actor",
-            key="use_current_actor",
-            disabled=not current_movie_actors,
-        ):
-            use_value_from_movie("filter_actor", current_movie_actors)
+        if normalised_widget != current_actor_values:
+            st.session_state[actor_widget_key] = list(current_actor_values)
+
+        actor_selection = st.multiselect(
+            "Actors",
+            actor_options,
+            key=actor_widget_key,
+        )
+        actor_selection_normalised = normalise_actor_selection(actor_selection)
+        if actor_selection_normalised != current_actor_values:
+            st.session_state.pop("last_applied_selection", None)
+            apply_filter_change("filter_actor", actor_selection_normalised)
 
 
 def render_recommendation_table(
@@ -1103,14 +1140,20 @@ def render_recommendation_table(
         "Actors",
         "Matches",
     ]
+    hidden_columns = {"Status", "Genres"}
+    display_rows = [
+        {key: value for key, value in row.items() if key not in hidden_columns}
+        for row in table_rows
+    ]
+    display_order = [col for col in column_order if col not in hidden_columns]
 
     table_key = "movie_recommendations_table"
     st.dataframe(
-        table_rows,
-        use_container_width=True,
+        display_rows,
+        width="stretch",
         height=table_height,
         hide_index=True,
-        column_order=column_order,
+        column_order=display_order,
         key=table_key,
         on_select="rerun",
     )
@@ -1119,6 +1162,9 @@ def render_recommendation_table(
         st.session_state.pop("table_selection_info", None)
         return None
 
+    column_lookup = {name: name for name in display_order}
+    column_lookup.update({str(index): name for index, name in enumerate(display_order)})
+
     widget_state = st.session_state.get(table_key)
     row_number, column_key = parse_table_selection(widget_state)
 
@@ -1126,12 +1172,19 @@ def render_recommendation_table(
         st.session_state.pop("table_selection_info", None)
         return None
 
-    selected_row = table_rows[row_number]
-    selected_value = selected_row.get(column_key) if column_key else None
+    column_name = column_lookup.get(column_key)
+    if column_name is None and column_key and column_key in display_order:
+        column_name = column_key
+
+    selected_value: Optional[object] = None
+    if column_name:
+        selected_row = display_rows[row_number]
+        selected_value = selected_row.get(column_name)
 
     st.session_state["table_selection_info"] = {
         "row": row_number,
-        "column": column_key,
+        "column": column_name,
+        "raw_column": column_key,
         "value": selected_value,
         "movie_id": option_ids[row_number],
     }
@@ -1150,14 +1203,14 @@ selected_actors: List[str] = []
 
 genre_filter = st.session_state.get("filter_genre")
 director_filter = st.session_state.get("filter_director")
-actor_filter = st.session_state.get("filter_actor")
+actor_filter_values = get_actor_filter_values()
 
 if genre_filter:
     selected_genres = [genre_filter]
 if director_filter:
     selected_directors = [director_filter]
-if actor_filter:
-    selected_actors = [actor_filter]
+if actor_filter_values:
+    selected_actors = list(actor_filter_values)
 
 genre_options = load_available_genres()
 director_options = load_directors_for_genres(tuple(selected_genres))
@@ -1168,11 +1221,13 @@ if director_filter and director_filter not in director_options:
     director_options = load_directors_for_genres(tuple(selected_genres))
 
 actor_options = load_actors_for_filters(tuple(selected_genres), tuple(selected_directors))
-if actor_filter and actor_filter not in actor_options:
-    st.session_state["filter_actor"] = None
-    actor_filter = None
-    selected_actors = []
-    actor_options = load_actors_for_filters(tuple(selected_genres), tuple(selected_directors))
+if selected_actors:
+    valid_actor_values = [actor for actor in selected_actors if actor in actor_options]
+    if valid_actor_values != selected_actors:
+        selected_actors = valid_actor_values
+        st.session_state["filter_actor"] = list(valid_actor_values)
+        st.session_state["actor_filter_widget"] = list(valid_actor_values)
+        actor_filter_values = list(valid_actor_values)
 
 poster_column_available = movie_table_has_column("poster_path")
 movies = fetch_movies_for_filters(
@@ -1230,11 +1285,6 @@ if not current_movie:
     st.session_state["current_movie_id"] = current_movie["tmdb_id"]
     current_movie_id = current_movie["tmdb_id"]
 
-def handle_surprise() -> None:
-    source = movies_sorted if movies_sorted else movies
-    st.session_state["current_movie_id"] = random.choice(source)["tmdb_id"]
-    trigger_rerun()
-
 tmdb_detail = fetch_tmdb_movie_detail(current_movie.get("tmdb_id"))
 combined_movie = dict(current_movie)
 omdb_detail = None
@@ -1249,7 +1299,6 @@ if tmdb_detail:
 current_movie_genres, current_movie_directors, current_movie_actors = render_movie_detail(
     combined_movie,
     omdb_detail,
-    on_surprise=handle_surprise,
 )
 
 render_filter_sidebar(
@@ -1276,4 +1325,4 @@ if selected_from_table and selected_from_table != current_movie_id:
     trigger_rerun()
 
 if len(movies_sorted) <= 1:
-    st.caption("You're at the end of the trail for now — try a surprise pick above!")
+    st.caption("You're at the end of the trail for now — adjust the filters for new matches.")
