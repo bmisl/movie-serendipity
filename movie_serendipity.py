@@ -725,24 +725,29 @@ def ensure_filter_defaults() -> None:
     st.session_state.setdefault("current_movie_id", None)
 
 
-def randomise_filters() -> None:
-    """Replace every active filter with fresh random values."""
-
-    st.session_state["filter_genre"] = pick_random_value(load_available_genres())
-    st.session_state["filter_director"] = pick_random_value(
-        load_directors_for_genres(tuple())
-    )
-    random_actor = pick_random_value(load_actors_for_filters(tuple(), tuple()))
-    actor_values = [random_actor] if random_actor else []
-    st.session_state["filter_actor"] = actor_values
-    st.session_state["actor_filter_widget"] = actor_values
-    st.session_state.pop("last_applied_selection", None)
-    st.session_state["current_movie_id"] = None
-    trigger_rerun()
-
-
 def apply_filter_change(session_key: str, value: object) -> None:
     """Persist a new filter value and refresh the recommendations."""
+
+    if session_key == "filter_actor":
+        if value is None:
+            new_values: List[str] = []
+        elif isinstance(value, str):
+            new_values = normalise_actor_selection([value])
+        elif isinstance(value, (list, tuple)):
+            items = [item for item in value if isinstance(item, str)]
+            new_values = normalise_actor_selection(items)
+        else:
+            new_values = []
+
+        current_values = get_actor_filter_values()
+        if new_values == current_values:
+            return
+
+        st.session_state["filter_actor"] = new_values
+        st.session_state["actor_filter_widget"] = list(new_values)
+        st.session_state["current_movie_id"] = None
+        trigger_rerun()
+        return
 
     if session_key == "filter_actor":
         if value is None:
@@ -970,9 +975,6 @@ def render_filter_sidebar(
     with st.sidebar:
         st.header("Discovery filters")
         st.caption("Pick a genre, director, or actor to reshape your matches.")
-
-        if st.button("🎲 Randomise filters", key="randomise_filters_sidebar"):
-            randomise_filters()
 
         selection_details: Optional[Tuple[str, str]] = None
         selected_column = None
