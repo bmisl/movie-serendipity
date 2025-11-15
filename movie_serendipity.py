@@ -944,6 +944,9 @@ def ensure_filter_defaults() -> None:
 
     st.session_state.setdefault("current_movie_id", None)
 
+        current_values = get_actor_filter_values()
+        if new_values == current_values:
+            return
 
 def apply_filter_change(session_key: str, value: object) -> None:
     """Persist a new filter value and refresh the recommendations."""
