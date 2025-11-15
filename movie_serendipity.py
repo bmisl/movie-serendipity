@@ -749,6 +749,27 @@ def apply_filter_change(session_key: str, value: object) -> None:
         trigger_rerun()
         return
 
+    if session_key == "filter_actor":
+        if value is None:
+            new_values: List[str] = []
+        elif isinstance(value, str):
+            new_values = normalise_actor_selection([value])
+        elif isinstance(value, (list, tuple)):
+            items = [item for item in value if isinstance(item, str)]
+            new_values = normalise_actor_selection(items)
+        else:
+            new_values = []
+
+        current_values = get_actor_filter_values()
+        if new_values == current_values:
+            return
+
+        st.session_state["filter_actor"] = new_values
+        st.session_state["actor_filter_widget"] = list(new_values)
+        st.session_state["current_movie_id"] = None
+        trigger_rerun()
+        return
+
     if st.session_state.get(session_key) == value:
         return
 
