@@ -944,6 +944,18 @@ def ensure_filter_defaults() -> None:
 
     st.session_state.setdefault("current_movie_id", None)
 
+    for session_key, widget_key, normaliser in filter_specs:
+        raw_values = coerce_str_sequence(st.session_state.get(session_key))
+        normalised = normaliser(raw_values)
+        st.session_state[session_key] = normalised
+
+        widget_values = coerce_str_sequence(st.session_state.get(widget_key))
+        widget_normalised = normaliser(widget_values)
+        if widget_normalised != normalised:
+            st.session_state[widget_key] = list(normalised)
+
+    st.session_state.setdefault("current_movie_id", None)
+
         current_values = get_actor_filter_values()
         if new_values == current_values:
             return
@@ -1297,7 +1309,6 @@ def render_filter_sidebar(
         genre_selection = st.multiselect(
             "Genres",
             genre_options,
-            default=current_genres,
             key=genre_widget_key,
             help="Leave empty to include every genre.",
         )
@@ -1325,7 +1336,6 @@ def render_filter_sidebar(
         director_selection = st.multiselect(
             "Directors",
             director_options,
-            default=current_directors,
             key=director_widget_key,
             help="Leave empty to include every director.",
         )
@@ -1347,7 +1357,6 @@ def render_filter_sidebar(
         actor_selection = st.multiselect(
             "Actors",
             actor_options,
-            default=current_actor_values,
             key=actor_widget_key,
             help="Add as many actors as you like.",
         )
@@ -1375,7 +1384,6 @@ def render_filter_sidebar(
         language_selection = st.multiselect(
             "Spoken languages",
             list(language_options.keys()),
-            default=current_languages,
             key=language_widget_key,
             format_func=lambda code: language_options.get(code, code.upper()),
             help="Matches include any movie that uses one of these languages.",
