@@ -10,6 +10,8 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 import requests
 import streamlit as st
 
+from app_config import ensure_database_file, get_secret
+
 DB_PATH = "movies.sqlite"
 BASE_URL = "https://www.omdbapi.com/"
 
@@ -18,15 +20,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed",
 )
-
-
-def get_secret(key: str) -> Optional[str]:
-    """Fetch configuration values from Streamlit secrets or the environment."""
-
-    if hasattr(st, "secrets") and key in st.secrets:
-        return st.secrets[key]
-    return os.getenv(key)
-
 
 def ensure_api_key(key: Optional[str], label: str) -> str:
     """Stop execution with a helpful message when a required key is missing."""
@@ -38,6 +31,8 @@ def ensure_api_key(key: Optional[str], label: str) -> str:
         st.stop()
     return key
 
+
+ensure_database_file(DB_PATH)
 
 OMDB_API_KEY = ensure_api_key(get_secret("OMDB_API_KEY"), "OMDB_API_KEY")
 

@@ -8,9 +8,13 @@ from typing import Iterable, List
 import pandas as pd
 import streamlit as st
 
+from app_config import ensure_database_file
+
 DB_PATH = "movies.sqlite"
 
 st.set_page_config(page_title="🎞️ Movie Catalogue Explorer", layout="wide")
+
+ensure_database_file(DB_PATH)
 
 
 def split_multi_value(value: object) -> List[str]:

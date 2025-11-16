@@ -8,6 +8,8 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import requests
 import streamlit as st
 
+from app_config import ensure_database_file, get_secret
+
 BASE_URL = "https://www.omdbapi.com/"
 TMDB_BASE_URL = "https://api.themoviedb.org/3"
 TMDB_IMAGE_BASE = "https://image.tmdb.org/t/p/w500"
@@ -57,14 +59,6 @@ TMDB_GENRE_IDS: Dict[str, int] = {
     "Western": 37,
 }
 
-def get_secret(key: str) -> Optional[str]:
-    """Fetch configuration values from Streamlit secrets or the environment."""
-
-    if hasattr(st, "secrets") and key in st.secrets:
-        return st.secrets[key]
-    return os.getenv(key)
-
-
 OMDB_API_KEY = get_secret("OMDB_API_KEY")
 TMDB_API_KEY = get_secret("TMDB_API_KEY")
 
@@ -85,6 +79,7 @@ st.set_page_config(layout="wide", initial_sidebar_state="collapsed")
 
 ensure_api_key(OMDB_API_KEY, "OMDB_API_KEY")
 ensure_api_key(TMDB_API_KEY, "TMDB_API_KEY")
+ensure_database_file(DB_PATH)
 
 
 def tmdb_get(path: str, params: Optional[Dict[str, object]] = None) -> Optional[dict]:
@@ -881,6 +876,36 @@ def normalise_language_selection(values: Optional[Sequence[str]]) -> List[str]:
         cleaned.append(candidate)
     return cleaned
 
+    if not values:
+        return []
+
+    cleaned: List[str] = []
+    seen: set[str] = set()
+    for raw in values:
+        if not isinstance(raw, str):
+            continue
+        candidate = raw.strip().lower()
+        if not candidate:
+            continue
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        cleaned.append(candidate)
+    return cleaned
+
+
+def coerce_str_sequence(value: object) -> List[str]:
+    """Return a list of strings extracted from various input shapes."""
+
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (list, tuple, set)):
+        return [item for item in value if isinstance(item, str)]
+    return []
+
+
+def get_actor_filter_values() -> List[str]:
+    """Fetch the current actor filter values as a normalised list."""
 
 def coerce_str_sequence(value: object) -> List[str]:
     """Return a list of strings extracted from various input shapes."""
@@ -931,6 +956,18 @@ def ensure_filter_defaults() -> None:
         ("filter_actor", "actor_filter_widget", normalise_actor_selection),
         ("filter_language", "language_filter_widget", normalise_language_selection),
     )
+
+    for session_key, widget_key, normaliser in filter_specs:
+        raw_values = coerce_str_sequence(st.session_state.get(session_key))
+        normalised = normaliser(raw_values)
+        st.session_state[session_key] = normalised
+
+        widget_values = coerce_str_sequence(st.session_state.get(widget_key))
+        widget_normalised = normaliser(widget_values)
+        if widget_normalised != normalised:
+            st.session_state[widget_key] = list(normalised)
+
+    st.session_state.setdefault("current_movie_id", None)
 
     for session_key, widget_key, normaliser in filter_specs:
         raw_values = coerce_str_sequence(st.session_state.get(session_key))
