@@ -37,19 +37,42 @@ ensure_database_file(DB_PATH)
 OMDB_API_KEY = ensure_api_key(get_secret("OMDB_API_KEY"), "OMDB_API_KEY")
 
 
-@st.cache_data(show_spinner=False)
-def fetch_omdb_poster(imdb_id: Optional[str]) -> Optional[str]:
-    """Return the OMDb poster URL for the supplied IMDb identifier."""
+def table_has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    """Return True if *table* contains the requested column."""
 
-    if not imdb_id:
+    try:
+        info_rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    except sqlite3.Error:
+        return False
+    for row in info_rows:
+        try:
+            if row[1] == column:
+                return True
+        except IndexError:
+            continue
+    return False
+
+
+@st.cache_data(show_spinner=False)
+def fetch_omdb_poster(
+    imdb_id: Optional[str],
+    title: Optional[str] = None,
+    year: Optional[str] = None,
+) -> Optional[str]:
+    """Return the OMDb poster URL for the supplied identifiers."""
+
+    params: Dict[str, str] = {"apikey": OMDB_API_KEY}
+    if imdb_id:
+        params["i"] = imdb_id
+    elif title:
+        params["t"] = title
+        if year:
+            params["y"] = year
+    else:
         return None
 
     try:
-        response = requests.get(
-            BASE_URL,
-            params={"i": imdb_id, "apikey": OMDB_API_KEY},
-            timeout=10,
-        )
+        response = requests.get(BASE_URL, params=params, timeout=10)
         response.raise_for_status()
         payload = response.json()
     except requests.RequestException:
@@ -76,13 +99,17 @@ def load_graph_data() -> Tuple[
 
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+    imdb_column = "m.imdb_id AS movie_imdb_id"
+    if not table_has_column(conn, "movies", "imdb_id"):
+        imdb_column = "NULL AS movie_imdb_id"
+
     rows = conn.execute(
-        """
+        f"""
         SELECT
             m.id AS movie_id,
             m.title AS movie_title,
             m.year AS movie_year,
-            m.imdb_id AS movie_imdb_id,
+            {imdb_column},
             p.id AS person_id,
             p.name AS person_name,
             mp.role AS role
@@ -336,7 +363,11 @@ def render_path(
             poster_url = details.get("omdb_poster")
             if poster_url is None:
                 imdb_id = details.get("imdb_id")
-                poster_url = fetch_omdb_poster(imdb_id)
+                poster_url = fetch_omdb_poster(
+                    imdb_id,
+                    title=movie_details.get(movie_id, {}).get("title"),
+                    year=movie_details.get(movie_id, {}).get("year"),
+                )
                 details["omdb_poster"] = poster_url
 
             caption = format_movie(movie_id, movie_details)
