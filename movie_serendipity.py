@@ -876,6 +876,8 @@ def normalise_language_selection(values: Optional[Sequence[str]]) -> List[str]:
         cleaned.append(candidate)
     return cleaned
 
+def get_actor_filter_values() -> List[str]:
+    """Fetch the current actor filter values as a normalised list."""
 
 def coerce_str_sequence(value: object) -> List[str]:
     """Return a list of strings extracted from various input shapes."""
@@ -940,6 +942,22 @@ def ensure_filter_defaults() -> None:
 
     st.session_state.setdefault("current_movie_id", None)
 
+    for session_key, widget_key, normaliser in filter_specs:
+        raw_values = coerce_str_sequence(st.session_state.get(session_key))
+        normalised = normaliser(raw_values)
+        st.session_state[session_key] = normalised
+
+        widget_values = coerce_str_sequence(st.session_state.get(widget_key))
+        widget_normalised = normaliser(widget_values)
+        if widget_normalised != normalised:
+            st.session_state[widget_key] = list(normalised)
+
+    st.session_state.setdefault("current_movie_id", None)
+
+    for session_key, widget_key, normaliser in filter_specs:
+        raw_values = coerce_str_sequence(st.session_state.get(session_key))
+        normalised = normaliser(raw_values)
+        st.session_state[session_key] = normalised
 
 def apply_filter_change(session_key: str, value: object) -> None:
     """Persist a new filter value and refresh the recommendations."""
