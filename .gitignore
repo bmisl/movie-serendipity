@@ -1,2 +1,14 @@
 .streamlit/
 movies.sqlite
+__pycache__/
+*.pyc
+.DS_Store
+.env
+.vscode/
+.ipynb_checkpoints/
+logs/
+data/
+models/
+outputs/
+*.log
+*.sqlite
