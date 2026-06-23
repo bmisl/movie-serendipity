@@ -298,16 +298,28 @@ def show_help_dialog():
     **Welcome to WatchMatch!**
     - **Step 1:** Enter your name and select your streaming services.
     - **Step 2:** Wait for your friends to join the same screen.
-    - **Step 3:** Pick a Genre and click 'Start Matching!'.
-    - **Phase 1:** Rate the most popular movies first. Lower-ranked titles appear if nobody picks from the current batch.
-    - **Phase 2:** The top movies are shown. Vote 'Yes' to finalize your choice.
-    - **No Matches?** If no one can agree on a movie from the 1st round, you can repeat the process for a 2nd and then a 3rd round with new movies. If that doesn't work, then it is no longer a movie night - instead, you go out for a walk!
+    - **Step 3:** Pick a Genre and select a matching mode to start:
 
-    *Shortcuts:*
-    - Press **H** to show this help menu.
-    - Press **L** to open the ranked movie list for the active genre.
-    - Press **R** to open the reset dialog. Type `reset` to confirm.
-    - Press **D** to toggle Dark Mode.
+    ### 🎬 Matching Modes
+    
+    #### 1. 24-Movie Ranking (Rank & Vote)
+    - **Phase 1 (Rating):** Rate 24 popular movies from 1 to 5 stars.
+    - **Phase 2 (Final Vote):** The top-rated movies are shown. Vote **Yes** to any movie you'd watch. If everyone votes Yes, it's a match!
+    
+    #### 2. Swipe Match (Fast Swiping)
+    - Movies are shown one-by-one. Click **Like** if you want to watch it, or **Skip** if you don't.
+    - If all participants like the same movie, it is a match!
+
+    ---
+    
+    *Keyboard Shortcuts:*
+    - **H**: Show this help menu.
+    - **L**: Open the ranked movie list for the active genre.
+    - **R**: Open the reset dialog.
+    - **D**: Toggle Dark Mode.
+    - **Spacebar**: Trigger a manual status refresh.
+    - **Left Arrow**: **Skip** the current movie (during Swipe Match).
+    - **Right Arrow**: **Like** the current movie (during Swipe Match).
     """
     )
 
@@ -316,34 +328,46 @@ if st.button("HiddenHelp"):
     show_help_dialog()
 
 
-@st.dialog("Ranked Movie List")
+@st.dialog("Ranked Movie List", width="large")
 def show_movie_list_dialog():
     if not lobby["genre"]:
         st.info("Choose a genre first.")
         return
 
     provider_ids = get_combined_provider_ids()
-    try:
-        ranked_movies = fetch_ranked_movies(GENRES[lobby["genre"]], provider_ids, LIST_BATCH_SIZE)
-    except Exception:
-        ranked_movies = []
+    with st.spinner("Fetching ranked movies and checking streaming services..."):
+        try:
+            ranked_movies = fetch_ranked_movies(GENRES[lobby["genre"]], provider_ids, LIST_BATCH_SIZE)
+        except Exception:
+            ranked_movies = []
 
-    if not ranked_movies:
-        st.info("No movies found for this genre and the selected streaming services.")
-        return
+        if not ranked_movies:
+            st.info("No movies found for this genre and the selected streaming services.")
+            return
+
+        shared_services = get_combined_service_names()
+        rows = []
+        for rank, movie in enumerate(ranked_movies, start=1):
+            # Resolve one available service for the movie
+            providers = fetch_movie_watch_providers(movie["id"])
+            service = next((p for p in providers if p in shared_services), None)
+            if not service and providers:
+                service = providers[0]
+            if not service:
+                service = "N/A"
+
+            rows.append(
+                {
+                    "Rank": rank,
+                    "Title": movie.get("title", "Untitled"),
+                    "Streaming Service": service,
+                    "Popularity": round(_safe_float(movie.get("popularity")), 2),
+                    "TMDB Rating": movie.get("vote_average", "N/A"),
+                    "Year": (movie.get("release_date", "") or "")[:4],
+                }
+            )
 
     st.caption(f"Showing the top {min(LIST_BATCH_SIZE, len(ranked_movies))} movies by TMDB popularity for the selected genre and shared streaming services.")
-    rows = []
-    for rank, movie in enumerate(ranked_movies, start=1):
-        rows.append(
-            {
-                "Rank": rank,
-                "Title": movie.get("title", "Untitled"),
-                "Popularity": round(_safe_float(movie.get("popularity")), 2),
-                "TMDB Rating": movie.get("vote_average", "N/A"),
-                "Year": (movie.get("release_date", "") or "")[:4],
-            }
-        )
     st.dataframe(rows, use_container_width=True, hide_index=True)
 
 
@@ -374,7 +398,9 @@ components.html(
     """
     <script>
     function bindShortcuts(doc) {
-        if (!doc || doc.window_watchmatch_keys_bound) {
+        if (!doc) return;
+        if (doc.window_watchmatch_keys_bound) {
+            console.log("WatchMatch: Keys already bound to", doc.title || "document");
             return;
         }
 
@@ -384,6 +410,13 @@ components.html(
 
             const key = (e.key || '').toLowerCase();
             const buttons = Array.from(doc.querySelectorAll('button'));
+            
+            // Robust check for left and right arrows
+            const isLeft = (key === 'arrowleft' || key === 'left' || e.code === 'ArrowLeft' || e.keyCode === 37);
+            const isRight = (key === 'arrowright' || key === 'right' || e.code === 'ArrowRight' || e.keyCode === 39);
+
+            console.log("WatchMatch keydown:", { key, code: e.code, keyCode: e.keyCode, isLeft, isRight, targetTag });
+
             let handled = false;
 
             if (key === ' ' || e.code === 'Space' || e.key === 'Spacebar') {
@@ -413,6 +446,24 @@ components.html(
             } else if (key === 'd') {
                 doc.documentElement.classList.toggle('custom-dark-mode');
                 handled = true;
+            } else if (isLeft) {
+                const skipBtn = buttons.find(b => (b.innerText || '').toLowerCase().includes('skip'));
+                if (skipBtn) {
+                    console.log("WatchMatch: Clicking Skip button");
+                    skipBtn.click();
+                    handled = true;
+                } else {
+                    console.log("WatchMatch: Skip button not found in active buttons:", buttons.map(b => b.innerText));
+                }
+            } else if (isRight) {
+                const likeBtn = buttons.find(b => (b.innerText || '').toLowerCase().includes('like'));
+                if (likeBtn) {
+                    console.log("WatchMatch: Clicking Like button");
+                    likeBtn.click();
+                    handled = true;
+                } else {
+                    console.log("WatchMatch: Like button not found in active buttons:", buttons.map(b => b.innerText));
+                }
             }
 
             if (handled) {
@@ -423,23 +474,38 @@ components.html(
 
         doc.addEventListener('keydown', handleKey, false);
         doc.window_watchmatch_keys_bound = true;
+        console.log("WatchMatch: Successfully bound keyboard shortcuts to", doc.title || "document");
     }
 
-    const parentDoc = window.parent && window.parent.document ? window.parent.document : null;
+    let parentDoc = null;
+    try {
+        if (window.parent && window.parent.document) {
+            parentDoc = window.parent.document;
+        }
+    } catch (e) {
+        console.error("WatchMatch Error: Accessing parent document failed.", e);
+    }
     const localDoc = document;
 
     [parentDoc, localDoc].forEach(bindShortcuts);
 
-    const buttons = Array.from((parentDoc || localDoc).querySelectorAll('button'));
-    const hiddenButtons = buttons.filter(b => b.innerText.includes('Hidden'));
-    hiddenButtons.forEach(btn => {
-        const btnContainer = btn.closest('div[data-testid="stButton"]');
-        if (btnContainer) btnContainer.style.display = 'none';
-    });
+    // Try to hide hidden buttons on parent if accessible, otherwise local
+    const targetDoc = parentDoc || localDoc;
+    const hideButtons = () => {
+        const buttons = Array.from(targetDoc.querySelectorAll('button'));
+        const hiddenButtons = buttons.filter(b => b.innerText.includes('Hidden'));
+        hiddenButtons.forEach(btn => {
+            const btnContainer = btn.closest('div[data-testid="stButton"]');
+            if (btnContainer) btnContainer.style.display = 'none';
+        });
+    };
+    hideButtons();
+    // Run again after a small delay in case they take a moment to render
+    setTimeout(hideButtons, 100);
+    setTimeout(hideButtons, 500);
     </script>
     """,
-    height=0,
-    width=0,
+    height=1,
 )
 
 st.markdown(
@@ -531,13 +597,13 @@ else:
                     st.error("No movies found for this combination of genre and streaming services.")
             st.caption("24 movies at a time with rating phases.")
         with mode_col_b:
-            if st.button("Tinder Swipe", type="primary"):
+            if st.button("Swipe Match", type="primary"):
                 if not start_matching("swipe", genre_name):
                     st.error("No movies found for this combination of genre and streaming services.")
             st.caption("Swipe movies one by one until you match.")
 
     elif lobby["state"] == "SWIPE":
-        st.subheader(f"Genre: {lobby['genre']} - Tinder Swipe")
+        st.subheader(f"Genre: {lobby['genre']} - Swipe Match")
         st.markdown("Swipe through movies one at a time. If everyone likes the same movie, it's a match.")
 
         current_movie = current_swipe_movie()
@@ -568,43 +634,47 @@ else:
                 st.caption(f"Available on: {', '.join(available_services)}")
 
         current_vote = user_votes.get(user_name)
-        if current_vote is None:
-            swipe_col_left, swipe_col_center, swipe_col_right = st.columns([1, 3, 1])
-            with swipe_col_left:
-                st.markdown("###")
-                st.markdown("###")
-                if st.button("Like", type="primary", use_container_width=True):
-                    record_swipe_vote(current_movie["id"], user_name, True)
-            with swipe_col_center:
-                if current_movie.get("poster_path"):
-                    st.image(f"{TMDB_IMAGE_BASE}{current_movie['poster_path']}", use_container_width=True)
-                st.markdown(f"### {current_movie['title']}")
-                st.write(current_movie.get("overview", "No overview."))
-            with swipe_col_right:
-                st.markdown("###")
-                st.markdown("###")
-                if st.button("Skip", use_container_width=True):
-                    record_swipe_vote(current_movie["id"], user_name, False)
-        else:
+        
+        # Center the movie card using a [1, 2, 1] column layout
+        swipe_col_left, swipe_col_center, swipe_col_right = st.columns([1, 2, 1])
+        with swipe_col_center:
             if current_movie.get("poster_path"):
-                st.image(f"{TMDB_IMAGE_BASE}{current_movie['poster_path']}", width=420)
-            st.markdown(f"### {current_movie['title']}")
+                st.markdown(
+                    f'<div style="display: flex; justify-content: center; margin-bottom: 15px;">'
+                    f'<img src="{TMDB_IMAGE_BASE}{current_movie["poster_path"]}" style="max-height: 280px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.15);">'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+            st.markdown(f"<h3 style='text-align: center; margin-top: 0px;'>{current_movie['title']}</h3>", unsafe_allow_html=True)
             st.write(current_movie.get("overview", "No overview."))
-            waiting_count = len(user_votes)
-            if waiting_count < len(lobby["users"]):
-                st.success("Waiting for the other users to swipe this movie...")
-                auto_refresh_page()
-                if st.button("Refresh Status"):
-                    st.rerun()
-            elif all(user_votes.get(name, False) for name in lobby["users"]):
-                st.success("It’s a match!")
-                if st.button("Show Match"):
-                    st.rerun()
+            
+            if current_vote is None:
+                # Add spacing
+                st.write("")
+                # Put Skip and Like side-by-side
+                btn_col1, btn_col2 = st.columns(2)
+                with btn_col1:
+                    if st.button("Skip", use_container_width=True):
+                        record_swipe_vote(current_movie["id"], user_name, False)
+                with btn_col2:
+                    if st.button("Like", type="primary", use_container_width=True):
+                        record_swipe_vote(current_movie["id"], user_name, True)
             else:
-                st.info("No match on this movie. Moving to the next one...")
-                auto_refresh_page(1500)
-                if st.button("Next Movie Now"):
-                    advance_swipe_movie()
+                waiting_count = len(user_votes)
+                if waiting_count < len(lobby["users"]):
+                    st.success("Waiting for the other users to swipe this movie...")
+                    auto_refresh_page()
+                    if st.button("Refresh Status"):
+                        st.rerun()
+                elif all(user_votes.get(name, False) for name in lobby["users"]):
+                    st.success("It’s a match!")
+                    if st.button("Show Match"):
+                        st.rerun()
+                else:
+                    st.info("No match on this movie. Moving to the next one...")
+                    auto_refresh_page(1500)
+                    if st.button("Next Movie Now"):
+                        advance_user_swipe_movie(user_name)
 
     elif lobby["state"] == "RATING":
         st.subheader(f"Genre: {lobby['genre']} - Phase 1: Rating")
