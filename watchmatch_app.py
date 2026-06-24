@@ -647,6 +647,21 @@ else:
         if lobby["match"].get("poster_path"):
             st.image(f"{TMDB_IMAGE_BASE}{lobby['match']['poster_path']}", width=300)
         st.markdown(lobby["match"].get("overview", ""))
+        
+        # Display all available streaming services
+        providers = fetch_movie_watch_providers(lobby["match"]["id"])
+        if providers:
+            shared_services = get_combined_service_names()
+            matched = [p for p in providers if p in shared_services]
+            if matched:
+                st.markdown(f"📺 **Available on your services:** {', '.join(matched)}")
+                other = [p for p in providers if p not in shared_services]
+                if other:
+                    st.caption(f"Also streaming on: {', '.join(other)}")
+            else:
+                st.markdown(f"📺 **Available on:** {', '.join(providers)}")
+        else:
+            st.markdown("📺 **Available on:** Not found or not streaming in Finland.")
 
         if st.button("Start Over / New Search"):
             reset_lobby()
