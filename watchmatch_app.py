@@ -160,6 +160,15 @@ def reset_lobby() -> None:
             del st.session_state[key]
 
 
+def leave_lobby(user_name: str) -> None:
+    """Remove a single user from the lobby without resetting everyone else."""
+    lobby["users"].pop(user_name, None)
+    st.session_state.user_name = None
+    for key in ("join_name", "join_services"):
+        if key in st.session_state:
+            del st.session_state[key]
+
+
 def initialise_swipe_cursors() -> None:
     for user in lobby["users"].values():
         user["swipe_cursor"] = 0
@@ -594,6 +603,15 @@ if dark_mode:
         unsafe_allow_html=True,
     )
 
+# Leave Session (only when logged in)
+if st.session_state.get("user_name"):
+    st.sidebar.divider()
+    with st.sidebar.expander("🚪 Leave / Change Profile"):
+        st.write("Leave the lobby to re-join with a different name or services. Other users are not affected.")
+        if st.button("Leave Session", use_container_width=True, key="sidebar_leave_btn"):
+            leave_lobby(st.session_state.user_name)
+            st.rerun()
+
 # Reset Session Expander
 with st.sidebar.expander("⚠️ Reset Session"):
     st.write("This clears all active users, votes, and matches.")
@@ -706,18 +724,32 @@ else:
 
         current_movie = current_swipe_movie()
         if not current_movie:
-            st.info("No more movies in the swipe queue.")
-            if st.button("Back to Setup"):
-                lobby["state"] = "SETUP"
-                st.rerun()
+            st.markdown("### 🎬 You've seen them all!")
+            st.info(
+                "You've swiped through all available movies without a group match. "
+                "Try loading more movies, picking a different genre, or just flip a coin!"
+            )
+            col_a, col_b = st.columns(2)
+            with col_a:
+                if st.button("🔄 Load More Movies", type="primary", use_container_width=True):
+                    # Extend the pool and reset swipe cursors
+                    current_pool_size = len(lobby.get("movie_pool", []))
+                    lobby["movie_pool"] = get_movie_pool(lobby["genre"], current_pool_size + MATCH_POOL_SIZE)
+                    initialise_swipe_cursors()
+                    st.rerun()
+            with col_b:
+                if st.button("⚙️ Back to Setup", use_container_width=True):
+                    lobby["state"] = "SETUP"
+                    st.rerun()
             st.stop()
 
         shared_service_names = get_combined_service_names()
         show_service_names = len(shared_service_names) > 1
         user_votes = lobby.setdefault("swipe_votes", {}).setdefault(current_movie["id"], {})
 
+        user_swipe_pos = int((lobby["users"].get(user_name) or {}).get("swipe_cursor", 0) or 0) + 1
         st.caption(
-            f"Movie {int(lobby.get('movie_cursor', 0) or 0) + 1} of {len(lobby.get('movie_pool', []))}"
+            f"Movie {user_swipe_pos} of {len(lobby.get('movie_pool', []))}"
         )
         st.caption(
             f"Popularity {_safe_float(current_movie.get('popularity')):.1f} · votes {int(_safe_float(current_movie.get('vote_count')))}"
@@ -858,7 +890,7 @@ else:
                 lobby["users"][user_name]["ready"] = True
 
                 all_ready = all(u["ready"] for u in lobby["users"].values())
-                if all_ready and len(lobby["users"]) > 1:
+                if all_ready:
                     if movie_batch_has_votes():
                         lobby["state"] = "ROUND_2"
                     else:
@@ -914,7 +946,7 @@ else:
                             lobby["users"][user_name]["round2_votes"][movie["id"]] = new_yes
                             if new_yes:
                                 all_yes = all(u["round2_votes"].get(movie["id"], False) for u in lobby["users"].values())
-                                if all_yes and len(lobby["users"]) > 1:
+                                if all_yes:
                                     lobby["match"] = movie
                                     st.rerun()
 
