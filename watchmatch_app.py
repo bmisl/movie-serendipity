@@ -444,8 +444,14 @@ components.html(
                     handled = true;
                 }
             } else if (key === 'd') {
-                doc.documentElement.classList.toggle('custom-dark-mode');
-                handled = true;
+                const toggleLabel = Array.from(doc.querySelectorAll('label')).find(el => el.innerText && el.innerText.toLowerCase().includes('dark mode'));
+                if (toggleLabel) {
+                    toggleLabel.click();
+                    handled = true;
+                } else {
+                    doc.documentElement.classList.toggle('custom-dark-mode');
+                    handled = true;
+                }
             } else if (isLeft) {
                 const skipBtn = buttons.find(b => (b.innerText || '').toLowerCase().includes('skip'));
                 if (skipBtn) {
@@ -521,6 +527,83 @@ html.custom-dark-mode img, html.custom-dark-mode video, html.custom-dark-mode if
 """,
     unsafe_allow_html=True,
 )
+
+# ==========================================
+# Sidebar Menu
+# ==========================================
+st.sidebar.title("🍿 WatchMatch Menu")
+
+# Help & Instructions Expander
+with st.sidebar.expander("ℹ️ Help & Instructions", expanded=False):
+    st.markdown(
+        """
+        **Welcome to WatchMatch!**
+        - **Step 1:** Enter your name and select your streaming services.
+        - **Step 2:** Wait for your friends to join the same screen.
+        - **Step 3:** Pick a Genre and select a matching mode to start:
+
+        ### 🎬 Matching Modes
+        
+        #### 1. 24-Movie Ranking (Rank & Vote)
+        - **Phase 1 (Rating):** Rate 24 popular movies from 1 to 5 stars.
+        - **Phase 2 (Final Vote):** Vote **Yes** to any movie you'd watch. If everyone votes Yes, it's a match!
+        
+        #### 2. Swipe Match (Fast Swiping)
+        - Movies are shown one-by-one. Click **Like** (or press **Right Arrow**) or **Skip** (or press **Left Arrow**).
+        - If all participants like the same movie, it is a match!
+
+        ---
+        
+        *Keyboard Shortcuts (PC):*
+        - **H**: Show help menu.
+        - **L**: Open ranked list.
+        - **R**: Open reset dialog.
+        - **D**: Toggle Dark Mode.
+        - **Space**: Trigger status refresh.
+        - **Left Arrow**: **Skip** movie.
+        - **Right Arrow**: **Like** movie.
+        """
+    )
+
+# Ranked Movie List Button
+if lobby["genre"]:
+    if st.sidebar.button("📊 Ranked Movie List", use_container_width=True, key="sidebar_ranked_list_btn"):
+        show_movie_list_dialog()
+else:
+    st.sidebar.info("Choose a genre to view the Ranked Movie List.")
+
+# Dark Mode Toggle (Default to True)
+if "dark_mode" not in st.session_state:
+    st.session_state.dark_mode = True
+
+dark_mode = st.sidebar.toggle("🌙 Dark Mode", value=st.session_state.dark_mode, key="sidebar_dark_mode")
+
+# Apply dark mode globally if active
+if dark_mode:
+    st.markdown(
+        """
+        <style>
+        html {
+            filter: invert(1) hue-rotate(180deg);
+        }
+        html img, html video, html iframe {
+            filter: invert(1) hue-rotate(180deg);
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+# Reset Session Expander
+with st.sidebar.expander("⚠️ Reset Session"):
+    st.write("This clears all active users, votes, and matches.")
+    confirmation = st.text_input("Type 'reset' to confirm", key="sidebar_reset_confirmation", label_visibility="collapsed")
+    if st.button("Reset Everything", type="primary", use_container_width=True, key="sidebar_reset_btn"):
+        if confirmation.strip().lower() == "reset":
+            reset_lobby()
+            st.rerun()
+        else:
+            st.error("Type reset exactly to confirm.")
 
 st.title("🍿 WatchMatch")
 st.markdown("Find the perfect movie for your group, available on your streaming services in Finland!")
