@@ -20,15 +20,17 @@ MATCH_BATCH_SIZE = 24
 LIST_BATCH_SIZE = 50
 MATCH_POOL_SIZE = 120
 
-# Hardcoded FI providers for prototype
+# Streaming providers — covers FI, DK, IS
 PROVIDERS = {
     "Netflix": 8,
     "Amazon Prime Video": 119,
     "Disney Plus": 337,
     "HBO Max": 1899,
     "Viaplay": 76,
-    "Ruutu": 338,
-    "Yle Areena": 323,
+    "Apple TV+": 350,
+    "Ruutu": 338,       # Finland
+    "Yle Areena": 323,  # Finland
+    "TV 2 Play": 398,   # Denmark
 }
 
 GENRES = {
@@ -45,6 +47,12 @@ GENRES = {
     "Thriller": 53,
 }
 
+REGIONS = {
+    "Finland 🇫🇮": "FI",
+    "Denmark 🇩🇰": "DK",
+    "Iceland 🇮🇸": "IS",
+}
+
 
 @st.cache_resource
 def get_global_session() -> dict:
@@ -58,6 +66,7 @@ def get_global_session() -> dict:
         "state": "SETUP",
         "match": None,
         "swipe_votes": {},
+        "region": "FI",
     }
 
 
@@ -85,11 +94,11 @@ def sort_movies_by_popularity(movies: List[dict]) -> List[dict]:
     )
 
 
-def build_discover_params(genre_id: int, provider_ids: List[int], page: int) -> dict:
+def build_discover_params(genre_id: int, provider_ids: List[int], page: int, region: str = "FI") -> dict:
     params = {
         "api_key": TMDB_API_KEY,
         "language": "en-US",
-        "watch_region": "FI",
+        "watch_region": region,
         "with_genres": genre_id,
         "sort_by": "popularity.desc",
         "page": page,
@@ -100,13 +109,13 @@ def build_discover_params(genre_id: int, provider_ids: List[int], page: int) -> 
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
-def fetch_ranked_movies(genre_id: int, provider_ids: tuple[int, ...], limit: int) -> List[dict]:
+def fetch_ranked_movies(genre_id: int, provider_ids: tuple[int, ...], limit: int, region: str = "FI") -> List[dict]:
     movies: List[dict] = []
     page = 1
     total_pages: Optional[int] = None
 
     while len(movies) < limit and (total_pages is None or page <= total_pages):
-        res = requests.get(f"{TMDB_BASE_URL}/discover/movie", params=build_discover_params(genre_id, list(provider_ids), page))
+        res = requests.get(f"{TMDB_BASE_URL}/discover/movie", params=build_discover_params(genre_id, list(provider_ids), page, region))
         if res.status_code != 200:
             break
         payload = res.json()
@@ -136,7 +145,7 @@ def get_combined_service_names() -> List[str]:
 def get_movie_pool(genre_name: str, limit: int = MATCH_POOL_SIZE) -> List[dict]:
     if not genre_name:
         return []
-    return fetch_ranked_movies(GENRES[genre_name], get_combined_provider_ids(), limit)
+    return fetch_ranked_movies(GENRES[genre_name], get_combined_provider_ids(), limit, lobby.get("region", "FI"))
 
 
 def reset_lobby() -> None:
@@ -152,6 +161,7 @@ def reset_lobby() -> None:
             "state": "SETUP",
             "match": None,
             "swipe_votes": {},
+            "region": "FI",
         }
     )
     st.session_state.user_name = None
@@ -280,12 +290,12 @@ def current_movie_batch() -> List[dict]:
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
-def fetch_movie_watch_providers(movie_id: int) -> List[str]:
+def fetch_movie_watch_providers(movie_id: int, region: str = "FI") -> List[str]:
     try:
         response = requests.get(f"{TMDB_BASE_URL}/movie/{movie_id}/watch/providers", params={"api_key": TMDB_API_KEY})
         if response.status_code != 200:
             return []
-        payload = response.json().get("results", {}).get("FI", {})
+        payload = response.json().get("results", {}).get(region, {})
         provider_names: List[str] = []
         for bucket in ("flatrate", "ads", "buy", "rent"):
             for provider in payload.get(bucket, []) or []:
@@ -343,10 +353,13 @@ def show_movie_list_dialog():
         st.info("Choose a genre first.")
         return
 
+    region = lobby.get("region", "FI")
     provider_ids = get_combined_provider_ids()
+    sort_by = st.radio("Sort by", ["📈 Popularity", "⭐ TMDB Rating"], horizontal=True)
+
     with st.spinner("Fetching ranked movies and checking streaming services..."):
         try:
-            ranked_movies = fetch_ranked_movies(GENRES[lobby["genre"]], provider_ids, LIST_BATCH_SIZE)
+            ranked_movies = fetch_ranked_movies(GENRES[lobby["genre"]], provider_ids, LIST_BATCH_SIZE, region)
         except Exception:
             ranked_movies = []
 
@@ -354,11 +367,14 @@ def show_movie_list_dialog():
             st.info("No movies found for this genre and the selected streaming services.")
             return
 
+        if "TMDB Rating" in sort_by:
+            ranked_movies = sorted(ranked_movies, key=lambda m: _safe_float(m.get("vote_average"), -1), reverse=True)
+
         shared_services = get_combined_service_names()
         rows = []
         for rank, movie in enumerate(ranked_movies, start=1):
             # Resolve one available service for the movie
-            providers = fetch_movie_watch_providers(movie["id"])
+            providers = fetch_movie_watch_providers(movie["id"], region)
             service = next((p for p in providers if p in shared_services), None)
             if not service and providers:
                 service = providers[0]
@@ -376,7 +392,8 @@ def show_movie_list_dialog():
                 }
             )
 
-    st.caption(f"Showing the top {min(LIST_BATCH_SIZE, len(ranked_movies))} movies by TMDB popularity for the selected genre and shared streaming services.")
+    sort_label = "TMDB Rating" if "TMDB Rating" in sort_by else "Popularity"
+    st.caption(f"Showing the top {min(LIST_BATCH_SIZE, len(ranked_movies))} movies sorted by {sort_label} for the selected genre and shared streaming services.")
     st.dataframe(rows, use_container_width=True, hide_index=True)
 
 
@@ -667,7 +684,7 @@ else:
         st.markdown(lobby["match"].get("overview", ""))
         
         # Display all available streaming services
-        providers = fetch_movie_watch_providers(lobby["match"]["id"])
+        providers = fetch_movie_watch_providers(lobby["match"]["id"], lobby.get("region", "FI"))
         if providers:
             shared_services = get_combined_service_names()
             matched = [p for p in providers if p in shared_services]
@@ -703,8 +720,32 @@ else:
             st.rerun()
 
         st.markdown("---")
-        st.markdown("### Select Genre & Start")
-        genre_name = st.selectbox("Genre", list(GENRES.keys()))
+        st.markdown("### Select Region, Genre & Start")
+
+        # Region selector
+        region_names = list(REGIONS.keys())
+        current_region_code = lobby.get("region", "FI")
+        current_region_name = next((k for k, v in REGIONS.items() if v == current_region_code), region_names[0])
+        selected_region = st.selectbox("Region", region_names, index=region_names.index(current_region_name))
+        lobby["region"] = REGIONS[selected_region]
+
+        # Genre selector with Surprise Me
+        genre_keys = list(GENRES.keys())
+        if "selected_genre" not in st.session_state:
+            st.session_state.selected_genre = genre_keys[0]
+        genre_col, surprise_col = st.columns([4, 1])
+        with surprise_col:
+            if st.button("🎲 Surprise!", use_container_width=True, help="Pick a random genre"):
+                st.session_state.selected_genre = random.choice(genre_keys)
+                st.rerun()
+        with genre_col:
+            genre_name = st.selectbox(
+                "Genre", genre_keys,
+                index=genre_keys.index(st.session_state.selected_genre)
+                      if st.session_state.selected_genre in genre_keys else 0
+            )
+        st.session_state.selected_genre = genre_name
+
         st.markdown("Choose how you want to match.")
         mode_col_a, mode_col_b = st.columns(2)
         with mode_col_a:
@@ -757,7 +798,7 @@ else:
         if show_service_names:
             available_services = [
                 service_name
-                for service_name in fetch_movie_watch_providers(current_movie["id"])
+                for service_name in fetch_movie_watch_providers(current_movie["id"], lobby.get("region", "FI"))
                 if service_name in shared_service_names
             ]
             if available_services:
@@ -808,8 +849,6 @@ else:
 
     elif lobby["state"] == "RATING":
         st.subheader(f"Genre: {lobby['genre']} - Phase 1: Rating")
-        if st.button("Ranked Movie List"):
-            show_movie_list_dialog()
         st.markdown("Rate the movies from 0 to 5. When you are done, click 'Submit Ratings' at the bottom.")
 
         user_data = lobby["users"][user_name]
@@ -840,7 +879,7 @@ else:
                         if show_service_names:
                             available_services = [
                                 service_name
-                                for service_name in fetch_movie_watch_providers(movie["id"])
+                                for service_name in fetch_movie_watch_providers(movie["id"], lobby.get("region", "FI"))
                                 if service_name in shared_service_names
                             ]
                             if available_services:
