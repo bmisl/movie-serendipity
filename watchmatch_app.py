@@ -53,9 +53,9 @@ GENRES = {
 }
 
 REGIONS = {
-    "Finland 🇫🇮": "FI",
-    "Denmark 🇩🇰": "DK",
-    "Iceland 🇮🇸": "IS",
+    "Finland": "FI",
+    "Denmark": "DK",
+    "Iceland": "IS",
 }
 
 
