@@ -20,17 +20,22 @@ MATCH_BATCH_SIZE = 24
 LIST_BATCH_SIZE = 50
 MATCH_POOL_SIZE = 120
 
-# Streaming providers — covers FI, DK, IS
-PROVIDERS = {
-    "Netflix": 8,
-    "Amazon Prime Video": 119,
-    "Disney Plus": 337,
-    "HBO Max": 1899,
-    "Viaplay": 76,
-    "Apple TV+": 350,
-    "Ruutu": 338,       # Finland
-    "Yle Areena": 323,  # Finland
-    "TV 2 Play": 398,   # Denmark
+REGION_PROVIDERS = {
+    "FI": {
+        "Netflix": 8, "Amazon Prime Video": 119, "Disney Plus": 337,
+        "HBO Max": 1899, "Viaplay": 76, "Apple TV+": 350,
+        "Ruutu": 338, "Yle Areena": 323, "Viddla": 539
+    },
+    "DK": {
+        "Netflix": 8, "Amazon Prime Video": 119, "Disney Plus": 337,
+        "HBO Max": 1899, "Viaplay": 76, "Apple TV+": 350,
+        "TV 2 Play": 398, "DRTV": 620
+    },
+    "IS": {
+        "Netflix": 8, "Amazon Prime Video": 119, "Disney Plus": 337,
+        "HBO Max": 1899, "Viaplay": 76, "Apple TV+": 350,
+        "RÚV": 2674
+    }
 }
 
 GENRES = {
@@ -99,9 +104,12 @@ def build_discover_params(genre_id: int, provider_ids: List[int], page: int, reg
         "api_key": TMDB_API_KEY,
         "language": "en-US",
         "watch_region": region,
+        "region": region, # Restricts release dates to the selected region
         "with_genres": genre_id,
         "sort_by": "popularity.desc",
         "page": page,
+        "with_original_language": "en|fi|da|sv|no|is",
+        "vote_count.gte": 100,
     }
     if provider_ids:
         params["with_watch_providers"] = "|".join(map(str, provider_ids))
@@ -132,7 +140,9 @@ def get_combined_provider_ids() -> tuple[int, ...]:
     combined_services = set()
     for user in lobby["users"].values():
         combined_services.update(user["services"])
-    return tuple(PROVIDERS[service] for service in combined_services)
+    region_code = lobby.get("region", "FI")
+    providers_map = REGION_PROVIDERS.get(region_code, REGION_PROVIDERS["FI"])
+    return tuple(providers_map[service] for service in combined_services if service in providers_map)
 
 
 def get_combined_service_names() -> List[str]:
@@ -657,8 +667,17 @@ user_name = st.session_state.user_name
 if not user_name:
     st.subheader("Join the Watch Party")
 
+    # Region selector
+    region_names = list(REGIONS.keys())
+    current_region_code = lobby.get("region", "FI")
+    current_region_name = next((k for k, v in REGIONS.items() if v == current_region_code), region_names[0])
+    selected_region = st.selectbox("Region", region_names, index=region_names.index(current_region_name))
+    lobby["region"] = REGIONS[selected_region]
+
     join_name = st.text_input("Your Name", key="join_name")
-    join_services = st.multiselect("Your Streaming Services (FI)", list(PROVIDERS.keys()), key="join_services")
+    
+    current_providers = REGION_PROVIDERS.get(lobby["region"], REGION_PROVIDERS["FI"])
+    join_services = st.multiselect(f"Your Streaming Services ({lobby['region']})", list(current_providers.keys()), key="join_services")
 
     if st.button("Join", type="primary"):
         if join_name:
@@ -722,13 +741,6 @@ else:
         st.markdown("---")
         st.markdown("### Select Region, Genre & Start")
 
-        # Region selector
-        region_names = list(REGIONS.keys())
-        current_region_code = lobby.get("region", "FI")
-        current_region_name = next((k for k, v in REGIONS.items() if v == current_region_code), region_names[0])
-        selected_region = st.selectbox("Region", region_names, index=region_names.index(current_region_name))
-        lobby["region"] = REGIONS[selected_region]
-
         # Genre selector with Surprise Me
         genre_keys = list(GENRES.keys())
         if "selected_genre" not in st.session_state:
@@ -789,9 +801,7 @@ else:
         user_votes = lobby.setdefault("swipe_votes", {}).setdefault(current_movie["id"], {})
 
         user_swipe_pos = int((lobby["users"].get(user_name) or {}).get("swipe_cursor", 0) or 0) + 1
-        st.caption(
-            f"Movie {user_swipe_pos} of {len(lobby.get('movie_pool', []))}"
-        )
+        st.caption(f"Movie {user_swipe_pos}")
         st.caption(
             f"Popularity {_safe_float(current_movie.get('popularity')):.1f} · votes {int(_safe_float(current_movie.get('vote_count')))}"
         )
