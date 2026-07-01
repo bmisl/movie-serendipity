@@ -1,5 +1,4 @@
 import random
-import string
 from typing import List, Optional
 
 import requests
@@ -122,12 +121,16 @@ def fetch_ranked_movies(genre_id: Optional[int], provider_ids: tuple[int, ...], 
     page = 1
     total_pages: Optional[int] = None
 
-    while len(movies) < limit and (total_pages is None or page <= total_pages):
+    seen_ids: set[int] = set()
+    while len(movies) < limit and (total_pages is None or page <= total_pages) and page <= 25:
         res = requests.get(f"{TMDB_BASE_URL}/discover/movie", params=build_discover_params(genre_id, list(provider_ids), page, region))
         if res.status_code != 200:
             break
         payload = res.json()
-        movies.extend(payload.get("results", []))
+        for movie in payload.get("results", []):
+            if movie["id"] not in seen_ids:
+                seen_ids.add(movie["id"])
+                movies.append(movie)
         total_pages = int(payload.get("total_pages") or page)
         if not payload.get("results"):
             break
@@ -142,7 +145,7 @@ def get_combined_provider_ids() -> tuple[int, ...]:
         combined_services.update(user["services"])
     region_code = lobby.get("region", "FI")
     providers_map = REGION_PROVIDERS.get(region_code, REGION_PROVIDERS["FI"])
-    return tuple(providers_map[service] for service in combined_services if service in providers_map)
+    return tuple(sorted(providers_map[service] for service in combined_services if service in providers_map))
 
 
 def get_combined_service_names() -> List[str]:
@@ -310,7 +313,7 @@ def fetch_movie_watch_providers(movie_id: int, region: str = "FI") -> List[str]:
         for bucket in ("flatrate", "free", "ads", "buy", "rent"):
             for provider in payload.get(bucket, []) or []:
                 pid = provider.get("provider_id")
-                name = provider_id_to_name.get(pid, provider.get("provider_name"))
+                name = provider_id_to_name.get(pid)
                 if name and name not in provider_names:
                     provider_names.append(name)
         return provider_names
@@ -546,19 +549,7 @@ components.html(
     height=1,
 )
 
-st.markdown(
-    """
-<style>
-html.custom-dark-mode {
-    filter: invert(1) hue-rotate(180deg);
-}
-html.custom-dark-mode img, html.custom-dark-mode video, html.custom-dark-mode iframe {
-    filter: invert(1) hue-rotate(180deg);
-}
-</style>
-""",
-    unsafe_allow_html=True,
-)
+
 
 # ==========================================
 # Sidebar Menu
@@ -644,7 +635,8 @@ with st.sidebar.expander("⚠️ Reset Session"):
             st.error("Type reset exactly to confirm.")
 
 st.title("🍿 WatchMatch")
-st.markdown("Find the perfect movie for your group, available on your streaming services in Finland!")
+region_label = next((name for name, code in REGIONS.items() if code == lobby.get("region", "FI")), "your region")
+st.markdown(f"Find the perfect movie for your group, available on your streaming services in {region_label}!")
 
 refresh_col, _ = st.columns([1, 5])
 with refresh_col:
@@ -767,12 +759,19 @@ else:
             st.caption("Swipe movies one by one until you match.")
 
         st.markdown("---")
-        if st.button("24 Most Popular Movies (Any Genre)", type="secondary", use_container_width=True):
-            if not start_matching("rating", None):
-                st.error("No movies found for your streaming services.")
+        st.markdown("**Or browse the most popular movies across all genres:**")
+        any_col_a, any_col_b = st.columns(2)
+        with any_col_a:
+            if st.button("🎬 Any Genre — Rank & Vote", use_container_width=True):
+                if not start_matching("rating", None):
+                    st.error("No movies found for your streaming services.")
+        with any_col_b:
+            if st.button("🎬 Any Genre — Swipe", use_container_width=True):
+                if not start_matching("swipe", None):
+                    st.error("No movies found for your streaming services.")
 
     elif lobby["state"] == "SWIPE":
-        st.subheader(f"Genre: {lobby['genre']} - Swipe Match")
+        st.subheader(f"Genre: {lobby['genre'] or 'Any Genre'} - Swipe Match")
         st.markdown("Swipe through movies one at a time. If everyone likes the same movie, it's a match.")
 
         current_movie = current_swipe_movie()
@@ -858,7 +857,7 @@ else:
                         advance_user_swipe_movie(user_name)
 
     elif lobby["state"] == "RATING":
-        st.subheader(f"Genre: {lobby['genre']} - Phase 1: Rating")
+        st.subheader(f"Genre: {lobby['genre'] or 'Any Genre'} - Phase 1: Rating")
         st.markdown("Rate the movies from 0 to 5. When you are done, click 'Submit Ratings' at the bottom.")
 
         user_data = lobby["users"][user_name]
@@ -902,9 +901,6 @@ else:
                         current_vote = user_data["votes"].get(movie["id"], 0)
                         options = [1, 2, 3, 4, 5]
 
-                        def format_popcorns(value):
-                            return str(value)
-
                         default_val = current_vote if current_vote > 0 else None
 
                         new_vote = st.segmented_control(
@@ -912,7 +908,7 @@ else:
                             options,
                             selection_mode="single",
                             default=default_val,
-                            format_func=format_popcorns,
+                            format_func=str,
                             key=f"rate_{movie['id']}",
                             label_visibility="collapsed",
                         )
