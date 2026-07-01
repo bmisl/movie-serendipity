@@ -44,6 +44,7 @@ GENRES = {
     "Animation": 16,
     "Comedy": 35,
     "Crime": 80,
+    "Documentary": 99,
     "Drama": 18,
     "Fantasy": 14,
     "Horror": 27,
@@ -99,25 +100,24 @@ def sort_movies_by_popularity(movies: List[dict]) -> List[dict]:
     )
 
 
-def build_discover_params(genre_id: int, provider_ids: List[int], page: int, region: str = "FI") -> dict:
+def build_discover_params(genre_id: Optional[int], provider_ids: List[int], page: int, region: str = "FI") -> dict:
     params = {
         "api_key": TMDB_API_KEY,
         "language": "en-US",
         "watch_region": region,
         "region": region, # Restricts release dates to the selected region
-        "with_genres": genre_id,
         "sort_by": "popularity.desc",
         "page": page,
-        "with_original_language": "en|fi|da|sv|no|is",
-        "vote_count.gte": 100,
     }
+    if genre_id is not None:
+        params["with_genres"] = genre_id
     if provider_ids:
         params["with_watch_providers"] = "|".join(map(str, provider_ids))
     return params
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
-def fetch_ranked_movies(genre_id: int, provider_ids: tuple[int, ...], limit: int, region: str = "FI") -> List[dict]:
+def fetch_ranked_movies(genre_id: Optional[int], provider_ids: tuple[int, ...], limit: int, region: str = "FI") -> List[dict]:
     movies: List[dict] = []
     page = 1
     total_pages: Optional[int] = None
@@ -152,10 +152,9 @@ def get_combined_service_names() -> List[str]:
     return sorted(combined_services)
 
 
-def get_movie_pool(genre_name: str, limit: int = MATCH_POOL_SIZE) -> List[dict]:
-    if not genre_name:
-        return []
-    return fetch_ranked_movies(GENRES[genre_name], get_combined_provider_ids(), limit, lobby.get("region", "FI"))
+def get_movie_pool(genre_name: Optional[str], limit: int = MATCH_POOL_SIZE) -> List[dict]:
+    genre_id = GENRES[genre_name] if genre_name else None
+    return fetch_ranked_movies(genre_id, get_combined_provider_ids(), limit, lobby.get("region", "FI"))
 
 
 def reset_lobby() -> None:
@@ -218,7 +217,7 @@ def movie_batch_has_votes() -> bool:
     )
 
 
-def start_matching(mode: str, genre_name: str) -> bool:
+def start_matching(mode: str, genre_name: Optional[str]) -> bool:
     lobby["genre"] = genre_name
     lobby["movie_cursor"] = 0
     lobby["movie_pool"] = get_movie_pool(genre_name, MATCH_POOL_SIZE)
@@ -307,9 +306,11 @@ def fetch_movie_watch_providers(movie_id: int, region: str = "FI") -> List[str]:
             return []
         payload = response.json().get("results", {}).get(region, {})
         provider_names: List[str] = []
-        for bucket in ("flatrate", "ads", "buy", "rent"):
+        provider_id_to_name = {v: k for k, v in REGION_PROVIDERS.get(region, {}).items()}
+        for bucket in ("flatrate", "free", "ads", "buy", "rent"):
             for provider in payload.get(bucket, []) or []:
-                name = provider.get("provider_name")
+                pid = provider.get("provider_id")
+                name = provider_id_to_name.get(pid, provider.get("provider_name"))
                 if name and name not in provider_names:
                     provider_names.append(name)
         return provider_names
@@ -359,22 +360,19 @@ if st.button("HiddenHelp"):
 
 @st.dialog("Ranked Movie List", width="large")
 def show_movie_list_dialog():
-    if not lobby["genre"]:
-        st.info("Choose a genre first.")
-        return
-
     region = lobby.get("region", "FI")
     provider_ids = get_combined_provider_ids()
     sort_by = st.radio("Sort by", ["📈 Popularity", "⭐ TMDB Rating"], horizontal=True)
 
     with st.spinner("Fetching ranked movies and checking streaming services..."):
         try:
-            ranked_movies = fetch_ranked_movies(GENRES[lobby["genre"]], provider_ids, LIST_BATCH_SIZE, region)
+            genre_id = GENRES[lobby["genre"]] if lobby.get("genre") else None
+            ranked_movies = fetch_ranked_movies(genre_id, provider_ids, LIST_BATCH_SIZE, region)
         except Exception:
             ranked_movies = []
 
         if not ranked_movies:
-            st.info("No movies found for this genre and the selected streaming services.")
+            st.info("No movies found for the selected criteria and streaming services.")
             return
 
         if "TMDB Rating" in sort_by:
@@ -385,11 +383,8 @@ def show_movie_list_dialog():
         for rank, movie in enumerate(ranked_movies, start=1):
             # Resolve one available service for the movie
             providers = fetch_movie_watch_providers(movie["id"], region)
-            service = next((p for p in providers if p in shared_services), None)
-            if not service and providers:
-                service = providers[0]
-            if not service:
-                service = "N/A"
+            available_on = [p for p in providers if p in shared_services]
+            service = ", ".join(available_on) if available_on else "N/A"
 
             rows.append(
                 {
@@ -403,7 +398,8 @@ def show_movie_list_dialog():
             )
 
     sort_label = "TMDB Rating" if "TMDB Rating" in sort_by else "Popularity"
-    st.caption(f"Showing the top {min(LIST_BATCH_SIZE, len(ranked_movies))} movies sorted by {sort_label} for the selected genre and shared streaming services.")
+    genre_text = f"'{lobby['genre']}'" if lobby.get("genre") else "Any Genre"
+    st.caption(f"Showing the top {min(LIST_BATCH_SIZE, len(ranked_movies))} movies sorted by {sort_label} for {genre_text} and shared streaming services.")
     st.dataframe(rows, use_container_width=True, hide_index=True)
 
 
@@ -602,11 +598,8 @@ with st.sidebar.expander("ℹ️ Help & Instructions", expanded=False):
     )
 
 # Ranked Movie List Button
-if lobby["genre"]:
-    if st.sidebar.button("📊 Ranked Movie List", use_container_width=True, key="sidebar_ranked_list_btn"):
-        show_movie_list_dialog()
-else:
-    st.sidebar.info("Choose a genre to view the Ranked Movie List.")
+if st.sidebar.button("📊 Ranked Movie List", use_container_width=True, key="sidebar_ranked_list_btn"):
+    show_movie_list_dialog()
 
 # Dark Mode Toggle (Default to True)
 if "dark_mode" not in st.session_state:
@@ -707,13 +700,14 @@ else:
         providers = fetch_movie_watch_providers(lobby["match"]["id"], lobby.get("region", "FI"))
         if providers:
             shared_services = get_combined_service_names()
-            matched = [p for p in providers if p in shared_services]
-            if matched:
-                st.markdown(f"📺 **Available on your services:** {', '.join(matched)}")
-                other = [p for p in providers if p not in shared_services]
-                if other:
-                    st.caption(f"Also streaming on: {', '.join(other)}")
+            if shared_services:
+                matched = [p for p in providers if p in shared_services]
+                if matched:
+                    st.markdown(f"📺 **Available on your services:** {', '.join(matched)}")
+                else:
+                    st.markdown("📺 **Available on your services:** None (N/A)")
             else:
+                # No services selected, show all
                 st.markdown(f"📺 **Available on:** {', '.join(providers)}")
         else:
             st.markdown("📺 **Available on:** Not found or not streaming in Finland.")
@@ -771,6 +765,11 @@ else:
                 if not start_matching("swipe", genre_name):
                     st.error("No movies found for this combination of genre and streaming services.")
             st.caption("Swipe movies one by one until you match.")
+
+        st.markdown("---")
+        if st.button("24 Most Popular Movies (Any Genre)", type="secondary", use_container_width=True):
+            if not start_matching("rating", None):
+                st.error("No movies found for your streaming services.")
 
     elif lobby["state"] == "SWIPE":
         st.subheader(f"Genre: {lobby['genre']} - Swipe Match")
