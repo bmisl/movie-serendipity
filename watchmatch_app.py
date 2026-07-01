@@ -680,6 +680,7 @@ if not user_name:
     join_services = st.multiselect(f"Your Streaming Services ({lobby['region']})", list(current_providers.keys()), key="join_services")
 
     if st.button("Join", type="primary"):
+        join_name = join_name.strip()
         if join_name:
             lobby["users"][join_name] = {
                 "services": join_services,
