@@ -309,14 +309,14 @@ def show_help_dialog():
     **Welcome to WatchMatch!**
     - **Step 1:** Enter your name and select your streaming services.
     - **Step 2:** Wait for your friends to join the same screen.
-    - **Step 3:** Pick a Genre and select a matching mode to start:
+    - **Step 3:** Pick a genre and start ranking movies.
 
-    ### 🎬 Matching Modes
-    
-    #### 1. Movie Ranking (Rank & Vote)
+    ### ?? Movie Ranking
     - **Phase 1 (Ranking):** Choose up to 5 movies from the 24-card list and assign unique ranks from 1 to 5 to any subset you like.
-    - **Phase 2 (Final Vote):** The top-ranked movies are shown. Vote **Yes** to any movie you'd watch. If everyone votes Yes, it's a match!
-    
+    - **Phase 2 (Final Vote):** The top-ranked movies are shown. Vote **Yes** to any movie you would watch. If everyone votes Yes, it's a match!
+
+    ---
+
     ---
     
     *Keyboard Shortcuts:*
@@ -511,14 +511,14 @@ with st.sidebar.expander("ℹ️ Help & Instructions", expanded=False):
         **Welcome to WatchMatch!**
         - **Step 1:** Enter your name and select your streaming services.
         - **Step 2:** Wait for your friends to join the same screen.
-        - **Step 3:** Pick a Genre and select a matching mode to start:
+        - **Step 3:** Pick a genre and start ranking movies.
 
-        ### 🎬 Matching Modes
-        
-        #### 1. Movie Ranking (Rank & Vote)
+        ### ?? Movie Ranking
         - **Phase 1 (Ranking):** Choose up to 5 movies from the 24-card list and assign unique ranks from 1 to 5 to any subset you like.
-        - **Phase 2 (Final Vote):** Vote **Yes** to any movie you'd watch. If everyone votes Yes, it's a match!
-        
+        - **Phase 2 (Final Vote):** Vote **Yes** to any movie you would watch. If everyone votes Yes, it's a match!
+
+        ---
+
         ---
         
         *Keyboard Shortcuts (PC):*
@@ -668,31 +668,23 @@ else:
         st.markdown("---")
         st.markdown("### Select Region, Genre & Start")
 
-        # Genre selector with Surprise Me
         genre_keys = list(GENRES.keys())
-        if "selected_genre" not in st.session_state:
-            st.session_state.selected_genre = genre_keys[0]
-        genre_col, surprise_col = st.columns([4, 1])
-        with surprise_col:
-            if st.button("🎲 Surprise!", use_container_width=True, help="Pick a random genre"):
-                st.session_state.selected_genre = random.choice(genre_keys)
-                st.rerun()
-        with genre_col:
-            genre_name = st.selectbox(
-                "Genre", genre_keys,
-                index=genre_keys.index(st.session_state.selected_genre)
-                      if st.session_state.selected_genre in genre_keys else 0
-            )
-        st.session_state.selected_genre = genre_name
+        genre_name = st.selectbox("Genre", genre_keys)
 
-        st.markdown("Choose how you want to match.")
-        if st.button("Movie Ranking", type="primary"):
+        if st.button("Movie Ranking", type="primary", key="setup_movie_ranking_btn"):
             if not start_matching("rating", genre_name):
                 st.error("No movies found for this combination of genre and streaming services.")
         st.caption("Rank 24 movies with 1-5 used only once each.")
 
         st.markdown("---")
         st.markdown("**Or browse the most popular movies across all genres:**")
+
+
+
+
+
+
+
         if st.button("🎬 Any Genre — Rank & Vote", use_container_width=True):
             if not start_matching("rating", None):
                 st.error("No movies found for your streaming services.")
