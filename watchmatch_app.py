@@ -15,7 +15,7 @@ except Exception:
 
 TMDB_BASE_URL = "https://api.themoviedb.org/3"
 TMDB_IMAGE_BASE = "https://image.tmdb.org/t/p/w500"
-MATCH_BATCH_SIZE = 24
+RANK_BATCH_SIZE = 24
 LIST_BATCH_SIZE = 50
 MATCH_POOL_SIZE = 120
 
@@ -70,7 +70,6 @@ def get_global_session() -> dict:
         "mode": "rating",
         "state": "SETUP",
         "match": None,
-        "swipe_votes": {},
         "region": "FI",
     }
 
@@ -172,8 +171,7 @@ def reset_lobby() -> None:
             "mode": "rating",
             "state": "SETUP",
             "match": None,
-            "swipe_votes": {},
-            "region": "FI",
+                "region": "FI",
         }
     )
     st.session_state.user_name = None
@@ -191,20 +189,14 @@ def leave_lobby(user_name: str) -> None:
             del st.session_state[key]
 
 
-def initialise_swipe_cursors() -> None:
-    for user in lobby["users"].values():
-        user["swipe_cursor"] = 0
-        user["swipe_done"] = False
-
-
 def load_next_movie_batch() -> None:
-    next_cursor = lobby.get("movie_cursor", 0) + MATCH_BATCH_SIZE
+    next_cursor = lobby.get("movie_cursor", 0) + RANK_BATCH_SIZE
     pool = lobby.get("movie_pool", [])
-    if next_cursor + MATCH_BATCH_SIZE > len(pool):
-        pool = get_movie_pool(lobby["genre"], max(MATCH_POOL_SIZE, next_cursor + MATCH_BATCH_SIZE))
+    if next_cursor + RANK_BATCH_SIZE > len(pool):
+        pool = get_movie_pool(lobby["genre"], max(MATCH_POOL_SIZE, next_cursor + RANK_BATCH_SIZE))
         lobby["movie_pool"] = pool
     lobby["movie_cursor"] = next_cursor
-    lobby["movies"] = pool[next_cursor: next_cursor + MATCH_BATCH_SIZE]
+    lobby["movies"] = pool[next_cursor: next_cursor + RANK_BATCH_SIZE]
     for user in lobby["users"].values():
         user["votes"] = {}
         user["round2_votes"] = {}
@@ -225,52 +217,12 @@ def start_matching(mode: str, genre_name: Optional[str]) -> bool:
     lobby["movie_cursor"] = 0
     lobby["movie_pool"] = get_movie_pool(genre_name, MATCH_POOL_SIZE)
     lobby["mode"] = mode
-    lobby["swipe_votes"] = {}
-    if mode == "swipe":
-        initialise_swipe_cursors()
-        lobby["movies"] = lobby["movie_pool"][:1]
-        lobby["state"] = "SWIPE"
-    else:
-        lobby["movies"] = lobby["movie_pool"][:MATCH_BATCH_SIZE]
-        lobby["state"] = "RATING"
+    lobby["movies"] = lobby["movie_pool"][:RANK_BATCH_SIZE]
+    lobby["state"] = "RATING"
     if lobby["movies"]:
         st.rerun()
         return True
     return False
-
-
-def current_swipe_movie() -> Optional[dict]:
-    pool = lobby.get("movie_pool", [])
-    user = lobby["users"].get(st.session_state.user_name or "")
-    cursor = int((user or {}).get("swipe_cursor", 0) or 0)
-    if 0 <= cursor < len(pool):
-        return pool[cursor]
-    return None
-
-
-def advance_user_swipe_movie(user_name: str) -> None:
-    user = lobby["users"].get(user_name)
-    if not user:
-        return
-    user["swipe_cursor"] = int(user.get("swipe_cursor", 0) or 0) + 1
-    pool = lobby.get("movie_pool", [])
-    user["swipe_done"] = user["swipe_cursor"] >= len(pool)
-    lobby["state"] = "SWIPE"
-    st.rerun()
-
-
-def record_swipe_vote(movie_id: int, user: str, liked: bool) -> None:
-    votes_for_movie = lobby.setdefault("swipe_votes", {}).setdefault(movie_id, {})
-    if votes_for_movie.get(user) == liked:
-        return
-    votes_for_movie[user] = liked
-
-    if all(votes_for_movie.get(name, False) for name in lobby["users"]):
-        lobby["match"] = next((movie for movie in lobby["movie_pool"] if movie["id"] == movie_id), None)
-        st.rerun()
-        return
-
-    advance_user_swipe_movie(user)
 
 
 def auto_refresh_page(interval_ms: int = 5000) -> None:
@@ -295,10 +247,36 @@ def auto_refresh_page(interval_ms: int = 5000) -> None:
 def current_movie_batch() -> List[dict]:
     pool = lobby.get("movie_pool", [])
     cursor = int(lobby.get("movie_cursor", 0) or 0)
-    batch = pool[cursor: cursor + MATCH_BATCH_SIZE]
+    batch = pool[cursor: cursor + RANK_BATCH_SIZE]
     if batch:
         return batch
     return sort_movies_by_popularity(lobby.get("movies", []))
+
+
+def apply_rank_selection(movie_id: int, user_name: str) -> None:
+    user = lobby["users"].get(user_name)
+    if not user:
+        return
+
+    key = f"rate_{movie_id}"
+    selected_rank = st.session_state.get(key)
+    try:
+        selected_rank = int(selected_rank) if selected_rank is not None else 0
+    except (TypeError, ValueError):
+        selected_rank = 0
+
+    if selected_rank not in {1, 2, 3, 4, 5}:
+        user["votes"][movie_id] = 0
+        return
+
+    for other_movie_id, other_rank in list(user["votes"].items()):
+        if other_movie_id != movie_id and other_rank == selected_rank:
+            user["votes"][other_movie_id] = 0
+            other_key = f"rate_{other_movie_id}"
+            if other_key in st.session_state:
+                st.session_state[other_key] = None
+
+    user["votes"][movie_id] = selected_rank
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
@@ -335,14 +313,10 @@ def show_help_dialog():
 
     ### 🎬 Matching Modes
     
-    #### 1. 24-Movie Ranking (Rank & Vote)
-    - **Phase 1 (Rating):** Rate 24 popular movies from 1 to 5 stars.
-    - **Phase 2 (Final Vote):** The top-rated movies are shown. Vote **Yes** to any movie you'd watch. If everyone votes Yes, it's a match!
+    #### 1. Movie Ranking (Rank & Vote)
+    - **Phase 1 (Ranking):** Choose up to 5 movies from the 24-card list and assign unique ranks from 1 to 5 to any subset you like.
+    - **Phase 2 (Final Vote):** The top-ranked movies are shown. Vote **Yes** to any movie you'd watch. If everyone votes Yes, it's a match!
     
-    #### 2. Swipe Match (Fast Swiping)
-    - Movies are shown one-by-one. Click **Like** if you want to watch it, or **Skip** if you don't.
-    - If all participants like the same movie, it is a match!
-
     ---
     
     *Keyboard Shortcuts:*
@@ -351,8 +325,6 @@ def show_help_dialog():
     - **R**: Open the reset dialog.
     - **D**: Toggle Dark Mode.
     - **Spacebar**: Trigger a manual status refresh.
-    - **Left Arrow**: **Skip** the current movie (during Swipe Match).
-    - **Right Arrow**: **Like** the current movie (during Swipe Match).
     """
     )
 
@@ -445,12 +417,6 @@ components.html(
 
             const key = (e.key || '').toLowerCase();
             const buttons = Array.from(doc.querySelectorAll('button'));
-            
-            // Robust check for left and right arrows
-            const isLeft = (key === 'arrowleft' || key === 'left' || e.code === 'ArrowLeft' || e.keyCode === 37);
-            const isRight = (key === 'arrowright' || key === 'right' || e.code === 'ArrowRight' || e.keyCode === 39);
-
-            console.log("WatchMatch keydown:", { key, code: e.code, keyCode: e.keyCode, isLeft, isRight, targetTag });
 
             let handled = false;
 
@@ -486,24 +452,6 @@ components.html(
                 } else {
                     doc.documentElement.classList.toggle('custom-dark-mode');
                     handled = true;
-                }
-            } else if (isLeft) {
-                const skipBtn = buttons.find(b => (b.innerText || '').toLowerCase().includes('skip'));
-                if (skipBtn) {
-                    console.log("WatchMatch: Clicking Skip button");
-                    skipBtn.click();
-                    handled = true;
-                } else {
-                    console.log("WatchMatch: Skip button not found in active buttons:", buttons.map(b => b.innerText));
-                }
-            } else if (isRight) {
-                const likeBtn = buttons.find(b => (b.innerText || '').toLowerCase().includes('like'));
-                if (likeBtn) {
-                    console.log("WatchMatch: Clicking Like button");
-                    likeBtn.click();
-                    handled = true;
-                } else {
-                    console.log("WatchMatch: Like button not found in active buttons:", buttons.map(b => b.innerText));
                 }
             }
 
@@ -567,14 +515,10 @@ with st.sidebar.expander("ℹ️ Help & Instructions", expanded=False):
 
         ### 🎬 Matching Modes
         
-        #### 1. 24-Movie Ranking (Rank & Vote)
-        - **Phase 1 (Rating):** Rate 24 popular movies from 1 to 5 stars.
+        #### 1. Movie Ranking (Rank & Vote)
+        - **Phase 1 (Ranking):** Choose up to 5 movies from the 24-card list and assign unique ranks from 1 to 5 to any subset you like.
         - **Phase 2 (Final Vote):** Vote **Yes** to any movie you'd watch. If everyone votes Yes, it's a match!
         
-        #### 2. Swipe Match (Fast Swiping)
-        - Movies are shown one-by-one. Click **Like** (or press **Right Arrow**) or **Skip** (or press **Left Arrow**).
-        - If all participants like the same movie, it is a match!
-
         ---
         
         *Keyboard Shortcuts (PC):*
@@ -583,8 +527,6 @@ with st.sidebar.expander("ℹ️ Help & Instructions", expanded=False):
         - **R**: Open reset dialog.
         - **D**: Toggle Dark Mode.
         - **Space**: Trigger status refresh.
-        - **Left Arrow**: **Skip** movie.
-        - **Right Arrow**: **Like** movie.
         """
     )
 
@@ -673,8 +615,6 @@ if not user_name:
                 "round2_votes": {},
                 "ready": False,
                 "index": 0,
-                "swipe_cursor": 0,
-                "swipe_done": False,
             }
             st.session_state.user_name = join_name
             st.rerun()
@@ -746,119 +686,20 @@ else:
         st.session_state.selected_genre = genre_name
 
         st.markdown("Choose how you want to match.")
-        mode_col_a, mode_col_b = st.columns(2)
-        with mode_col_a:
-            if st.button("24-Movie Ranking", type="primary"):
-                if not start_matching("rating", genre_name):
-                    st.error("No movies found for this combination of genre and streaming services.")
-            st.caption("24 movies at a time with rating phases.")
-        with mode_col_b:
-            if st.button("Swipe Match", type="primary"):
-                if not start_matching("swipe", genre_name):
-                    st.error("No movies found for this combination of genre and streaming services.")
-            st.caption("Swipe movies one by one until you match.")
+        if st.button("Movie Ranking", type="primary"):
+            if not start_matching("rating", genre_name):
+                st.error("No movies found for this combination of genre and streaming services.")
+        st.caption("Rank 24 movies with 1-5 used only once each.")
 
         st.markdown("---")
         st.markdown("**Or browse the most popular movies across all genres:**")
-        any_col_a, any_col_b = st.columns(2)
-        with any_col_a:
-            if st.button("🎬 Any Genre — Rank & Vote", use_container_width=True):
-                if not start_matching("rating", None):
-                    st.error("No movies found for your streaming services.")
-        with any_col_b:
-            if st.button("🎬 Any Genre — Swipe", use_container_width=True):
-                if not start_matching("swipe", None):
-                    st.error("No movies found for your streaming services.")
-
-    elif lobby["state"] == "SWIPE":
-        st.subheader(f"Genre: {lobby['genre'] or 'Any Genre'} - Swipe Match")
-        st.markdown("Swipe through movies one at a time. If everyone likes the same movie, it's a match.")
-
-        current_movie = current_swipe_movie()
-        if not current_movie:
-            st.markdown("### 🎬 You've seen them all!")
-            st.info(
-                "You've swiped through all available movies without a group match. "
-                "Try loading more movies, picking a different genre, or just flip a coin!"
-            )
-            col_a, col_b = st.columns(2)
-            with col_a:
-                if st.button("🔄 Load More Movies", type="primary", use_container_width=True):
-                    # Extend the pool and reset swipe cursors
-                    current_pool_size = len(lobby.get("movie_pool", []))
-                    lobby["movie_pool"] = get_movie_pool(lobby["genre"], current_pool_size + MATCH_POOL_SIZE)
-                    initialise_swipe_cursors()
-                    st.rerun()
-            with col_b:
-                if st.button("⚙️ Back to Setup", use_container_width=True):
-                    lobby["state"] = "SETUP"
-                    st.rerun()
-            st.stop()
-
-        shared_service_names = get_combined_service_names()
-        show_service_names = len(shared_service_names) > 1
-        user_votes = lobby.setdefault("swipe_votes", {}).setdefault(current_movie["id"], {})
-
-        user_swipe_pos = int((lobby["users"].get(user_name) or {}).get("swipe_cursor", 0) or 0) + 1
-        st.caption(f"Movie {user_swipe_pos}")
-        st.caption(
-            f"Popularity {_safe_float(current_movie.get('popularity')):.1f} · votes {int(_safe_float(current_movie.get('vote_count')))}"
-        )
-        if show_service_names:
-            available_services = [
-                service_name
-                for service_name in fetch_movie_watch_providers(current_movie["id"], lobby.get("region", "FI"))
-                if service_name in shared_service_names
-            ]
-            if available_services:
-                st.caption(f"Available on: {', '.join(available_services)}")
-
-        current_vote = user_votes.get(user_name)
-        
-        # Center the movie card using a [1, 2, 1] column layout
-        swipe_col_left, swipe_col_center, swipe_col_right = st.columns([1, 2, 1])
-        with swipe_col_center:
-            if current_movie.get("poster_path"):
-                st.markdown(
-                    f'<div style="display: flex; justify-content: center; margin-bottom: 15px;">'
-                    f'<img src="{TMDB_IMAGE_BASE}{current_movie["poster_path"]}" style="max-height: 280px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.15);">'
-                    f'</div>',
-                    unsafe_allow_html=True,
-                )
-            st.markdown(f"<h3 style='text-align: center; margin-top: 0px;'>{current_movie['title']}</h3>", unsafe_allow_html=True)
-            st.write(current_movie.get("overview", "No overview."))
-            
-            if current_vote is None:
-                # Add spacing
-                st.write("")
-                # Put Skip and Like side-by-side
-                btn_col1, btn_col2 = st.columns(2)
-                with btn_col1:
-                    if st.button("Skip", use_container_width=True):
-                        record_swipe_vote(current_movie["id"], user_name, False)
-                with btn_col2:
-                    if st.button("Like", type="primary", use_container_width=True):
-                        record_swipe_vote(current_movie["id"], user_name, True)
-            else:
-                waiting_count = len(user_votes)
-                if waiting_count < len(lobby["users"]):
-                    st.success("Waiting for the other users to swipe this movie...")
-                    auto_refresh_page()
-                    if st.button("Refresh Status"):
-                        st.rerun()
-                elif all(user_votes.get(name, False) for name in lobby["users"]):
-                    st.success("It’s a match!")
-                    if st.button("Show Match"):
-                        st.rerun()
-                else:
-                    st.info("No match on this movie. Moving to the next one...")
-                    auto_refresh_page(1500)
-                    if st.button("Next Movie Now"):
-                        advance_user_swipe_movie(user_name)
+        if st.button("🎬 Any Genre — Rank & Vote", use_container_width=True):
+            if not start_matching("rating", None):
+                st.error("No movies found for your streaming services.")
 
     elif lobby["state"] == "RATING":
-        st.subheader(f"Genre: {lobby['genre'] or 'Any Genre'} - Phase 1: Rating")
-        st.markdown("Rate the movies from 0 to 5. When you are done, click 'Submit Ratings' at the bottom.")
+        st.subheader(f"Genre: {lobby['genre'] or 'Any Genre'} - Phase 1: Movie Ranking")
+        st.markdown("Choose up to 5 movies from the 24-card list and assign unique ranks from 1 to 5 to any subset you like. Then click 'Submit Ranking' at the bottom.")
 
         user_data = lobby["users"][user_name]
         movies_to_show = current_movie_batch()
@@ -872,7 +713,7 @@ else:
                 st.rerun()
             st.stop()
 
-        st.caption("Movies are sorted by TMDB popularity, highest first.")
+        st.caption("These 24 movies are sorted by TMDB popularity, highest first.")
 
         cols_per_row = 6
         for i in range(0, len(movies_to_show), cols_per_row):
@@ -900,51 +741,54 @@ else:
 
                         current_vote = user_data["votes"].get(movie["id"], 0)
                         options = [1, 2, 3, 4, 5]
-
                         default_val = current_vote if current_vote > 0 else None
 
-                        new_vote = st.segmented_control(
-                            "Rating",
+                        st.segmented_control(
+                            "Rank",
                             options,
                             selection_mode="single",
                             default=default_val,
                             format_func=str,
                             key=f"rate_{movie['id']}",
                             label_visibility="collapsed",
+                            on_change=apply_rank_selection,
+                            args=(movie["id"], user_name),
                         )
-
-                        final_vote = new_vote if new_vote is not None else 0
-
-                        if final_vote != current_vote:
-                            lobby["users"][user_name]["votes"][movie["id"]] = final_vote
-                            st.rerun()
-
-                        with st.expander("ℹ️ Info"):
+                        with st.expander("ℹ️ Info"): 
                             st.write(f"**{movie['title']}** ({movie.get('release_date', '')[:4]})")
-                            st.caption(f"⭐ {movie.get('vote_average', 'N/A')}")
+                            st.caption(f"Rating: {movie.get('vote_average', 'N/A')}")
                             st.write(movie.get("overview", "No overview."))
 
         st.markdown("---")
         if user_data["ready"]:
-            st.success("Waiting for other friends to finish rating...")
+            st.success("Waiting for other friends to finish ranking...")
             auto_refresh_page()
             if st.button("Refresh Status"):
                 st.rerun()
         else:
-            if st.button("Submit Ratings", type="primary"):
-                lobby["users"][user_name]["ready"] = True
+            if st.button("Submit Ranking", type="primary"):
+                submitted_votes = [user_data["votes"].get(movie["id"], 0) for movie in movies_to_show]
+                ranked_votes = [vote for vote in submitted_votes if vote > 0]
+                if not ranked_votes:
+                    st.error("Rank between 1 and 5 movies before submitting.")
+                elif len(ranked_votes) > 5:
+                    st.error("You can only rank up to 5 movies.")
+                elif len(set(ranked_votes)) != len(ranked_votes):
+                    st.error("Use each rank from 1 to 5 at most once.")
+                else:
+                    lobby["users"][user_name]["ready"] = True
 
-                all_ready = all(u["ready"] for u in lobby["users"].values())
-                if all_ready:
-                    if movie_batch_has_votes():
-                        lobby["state"] = "ROUND_2"
-                    else:
-                        load_next_movie_batch()
-                st.rerun()
+                    all_ready = all(u["ready"] for u in lobby["users"].values())
+                    if all_ready:
+                        if movie_batch_has_votes():
+                            lobby["state"] = "ROUND_2"
+                        else:
+                            load_next_movie_batch()
+                    st.rerun()
 
     elif lobby["state"] == "ROUND_2":
         st.subheader("Phase 2: Final Vote")
-        st.markdown("Here are the top rated movies. Vote **Yes** to any movie you'd watch. If everyone votes Yes, it's a Match!")
+        st.markdown("Here are the top ranked movies. Vote **Yes** to any movie you'd watch. If everyone votes Yes, it's a Match!")
 
         movie_scores = []
         for movie in lobby["movies"]:
@@ -953,7 +797,7 @@ else:
                 movie_scores.append((total_score, movie))
 
         movie_scores.sort(key=lambda item: item[0], reverse=True)
-        top_movies = [movie for _, movie in movie_scores[:6]]
+        top_movies = [movie for _, movie in movie_scores[:5]]
 
         user_data = lobby["users"][user_name]
 
@@ -994,8 +838,7 @@ else:
                                 if all_yes:
                                     lobby["match"] = movie
                                     st.rerun()
-
-                        with st.expander("ℹ️ Info"):
+                        with st.expander("ℹ️ Info"): 
                             st.write(f"**Total Popcorns:** {sum(u['votes'].get(movie['id'], 0) for u in lobby['users'].values())} 🍿")
                             st.write(f"**{movie['title']}** ({movie.get('release_date', '')[:4]})")
                             st.write(movie.get("overview", "No overview."))
