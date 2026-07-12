@@ -38,6 +38,7 @@ REGION_PROVIDERS = {
 }
 
 GENRES = {
+    "All": None,
     "Action": 28,
     "Adventure": 12,
     "Animation": 16,
@@ -225,6 +226,34 @@ def start_matching(mode: str, genre_name: Optional[str]) -> bool:
     return False
 
 
+def start_browsing(genre_name: Optional[str]) -> bool:
+    lobby["genre"] = genre_name
+    lobby["movie_cursor"] = 0
+    lobby["movie_pool"] = get_movie_pool(genre_name, 96)
+    lobby["state"] = "BROWSE"
+    if lobby["movie_pool"]:
+        st.rerun()
+        return True
+    return False
+
+
+def load_prev_browse_page() -> None:
+    curr_cursor = lobby.get("movie_cursor", 0)
+    lobby["movie_cursor"] = max(0, curr_cursor - 96)
+    st.rerun()
+
+
+def load_next_browse_page() -> None:
+    next_cursor = lobby.get("movie_cursor", 0) + 96
+    pool = lobby.get("movie_pool", [])
+    if next_cursor + 96 > len(pool):
+        new_limit = len(pool) + 96
+        pool = get_movie_pool(lobby["genre"], new_limit)
+        lobby["movie_pool"] = pool
+    lobby["movie_cursor"] = next_cursor
+    st.rerun()
+
+
 def auto_refresh_page(interval_ms: int = 5000) -> None:
     components.html(
         f"""
@@ -301,6 +330,214 @@ def fetch_movie_watch_providers(movie_id: int, region: str = "FI") -> List[str]:
 
 st.set_page_config(page_title="WatchMatch", layout="wide", initial_sidebar_state="collapsed")
 
+# Theme Selection Configuration
+theme_style = st.session_state.get("sidebar_theme_style", "Netflix (Red)")
+
+theme_configs = {
+    "Netflix (Red)": {
+        "bg": "radial-gradient(circle at top, #1c1010 0%, #0c0707 100%)",
+        "accent": "#e50914",
+        "accent_glow": "rgba(229, 9, 20, 0.4)",
+        "accent_glow_hover": "rgba(229, 9, 20, 0.6)",
+        "card_border_hover": "rgba(229, 9, 20, 0.4)",
+        "card_shadow_hover": "rgba(229, 9, 20, 0.2)",
+        "button_gradient": "linear-gradient(135deg, #e50914 0%, #b81d24 100%)"
+    },
+    "HBO Max (Purple)": {
+        "bg": "radial-gradient(circle at top, #161026 0%, #0a0712 100%)",
+        "accent": "#9933ff",
+        "accent_glow": "rgba(153, 51, 255, 0.4)",
+        "accent_glow_hover": "rgba(153, 51, 255, 0.6)",
+        "card_border_hover": "rgba(153, 51, 255, 0.4)",
+        "card_shadow_hover": "rgba(153, 51, 255, 0.2)",
+        "button_gradient": "linear-gradient(135deg, #9933ff 0%, #6600cc 100%)"
+    },
+    "Prime Video (Blue)": {
+        "bg": "radial-gradient(circle at top, #0f1721 0%, #05080c 100%)",
+        "accent": "#00a8e1",
+        "accent_glow": "rgba(0, 168, 225, 0.4)",
+        "accent_glow_hover": "rgba(0, 168, 225, 0.6)",
+        "card_border_hover": "rgba(0, 168, 225, 0.4)",
+        "card_shadow_hover": "rgba(0, 168, 225, 0.2)",
+        "button_gradient": "linear-gradient(135deg, #00a8e1 0%, #007eb9 100%)"
+    },
+    "Apple TV+ (Glass)": {
+        "bg": "radial-gradient(circle at top, #1e1e1e 0%, #0c0c0c 100%)",
+        "accent": "#ffffff",
+        "accent_glow": "rgba(255, 255, 255, 0.3)",
+        "accent_glow_hover": "rgba(255, 255, 255, 0.5)",
+        "card_border_hover": "rgba(255, 255, 255, 0.4)",
+        "card_shadow_hover": "rgba(255, 255, 255, 0.15)",
+        "button_gradient": "linear-gradient(135deg, #555555 0%, #222222 100%)"
+    }
+}
+
+cfg = theme_configs.get(theme_style, theme_configs["Netflix (Red)"])
+
+# Inject Custom Cinematic Dark CSS
+st.markdown(
+    f"""
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap');
+    
+    /* Apply premium typography and background */
+    html, body, [data-testid="stAppViewContainer"] {{
+        font-family: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        background: {cfg['bg']} !important;
+        color: #f5f5f7 !important;
+    }}
+    
+    /* Clean up top padding and hide default streamlit header/footer */
+    [data-testid="stHeader"], footer {{
+        display: none !important;
+    }}
+    
+    /* Main block padding adjustment */
+    [data-testid="stAppViewBlockContainer"] {{
+        padding-top: 2rem !important;
+        padding-bottom: 5rem !important;
+    }}
+    
+    /* Premium Title Header styling */
+    h1, h2, h3, h4, h5, h6 {{
+        font-family: 'Outfit', sans-serif;
+        font-weight: 600 !important;
+        letter-spacing: -0.02em;
+        color: #ffffff !important;
+    }}
+    
+    /* Subtitle styling */
+    div[data-testid="stMarkdownContainer"] p {{
+        color: #a1a1a6;
+        font-size: 1.05rem;
+    }}
+    
+    /* Customize Streamlit Buttons */
+    /* Primary buttons (Vibrant gradient style) */
+    div[data-testid="stButton"] button[kind="primary"] {{
+        background: {cfg['button_gradient']} !important;
+        border: none !important;
+        color: white !important;
+        font-weight: 600 !important;
+        border-radius: 8px !important;
+        box-shadow: 0 4px 15px {cfg['accent_glow']} !important;
+        transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1) !important;
+        padding: 0.5rem 1.5rem !important;
+        width: 100%;
+    }}
+    div[data-testid="stButton"] button[kind="primary"]:hover {{
+        transform: translateY(-2px) !important;
+        box-shadow: 0 6px 20px {cfg['accent_glow_hover']} !important;
+    }}
+    
+    /* Secondary/standard buttons (Apple TV+ Glass style) */
+    div[data-testid="stButton"] button[kind="secondary"] {{
+        background: rgba(255, 255, 255, 0.08) !important;
+        border: 1px solid rgba(255, 255, 255, 0.12) !important;
+        color: #ffffff !important;
+        border-radius: 8px !important;
+        font-weight: 500 !important;
+        transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1) !important;
+        backdrop-filter: blur(8px);
+        width: 100%;
+    }}
+    div[data-testid="stButton"] button[kind="secondary"]:hover {{
+        background: rgba(255, 255, 255, 0.15) !important;
+        border-color: rgba(255, 255, 255, 0.25) !important;
+        transform: translateY(-1px) !important;
+    }}
+    
+    /* Movie Cards Container */
+    div[data-testid="column"]:has(.movie-card-marker) {{
+        background: rgba(255, 255, 255, 0.03) !important;
+        border: 1px solid rgba(255, 255, 255, 0.05) !important;
+        border-radius: 16px !important;
+        padding: 16px !important;
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4) !important;
+        backdrop-filter: blur(12px);
+        transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1) !important;
+    }}
+    div[data-testid="column"]:has(.movie-card-marker):hover {{
+        transform: translateY(-6px) !important;
+        border-color: {cfg['card_border_hover']} !important;
+        box-shadow: 0 15px 35px {cfg['card_shadow_hover']} !important;
+        background: rgba(255, 255, 255, 0.05) !important;
+    }}
+    
+    /* Movie card image/poster styling */
+    div[data-testid="column"] img {{
+        border-radius: 12px !important;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3) !important;
+        transition: transform 0.3s ease !important;
+    }}
+    
+    /* Input selection containers (Glassmorphism inputs) */
+    div[data-baseweb="select"] > div {{
+        background-color: rgba(255, 255, 255, 0.04) !important;
+        border: 1px solid rgba(255, 255, 255, 0.08) !important;
+        border-radius: 8px !important;
+        color: white !important;
+    }}
+    
+    div[data-baseweb="select"] span {{
+        color: white !important;
+    }}
+    
+    /* Segmented Control / Popcorn buttons styling */
+    div[data-testid="stSegmentedControl"] {{
+        background: rgba(0, 0, 0, 0.25) !important;
+        border-radius: 8px !important;
+        border: 1px solid rgba(255, 255, 255, 0.08) !important;
+        padding: 2px !important;
+    }}
+    
+    div[data-testid="stSegmentedControl"] button {{
+        background: transparent !important;
+        border: none !important;
+        color: #a1a1a6 !important;
+        border-radius: 6px !important;
+        transition: all 0.2s ease !important;
+    }}
+    
+    div[data-testid="stSegmentedControl"] button[aria-checked="true"] {{
+        background: rgba(255, 255, 255, 0.12) !important;
+        color: #ffffff !important;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2) !important;
+    }}
+    
+    /* Sidebar custom styling */
+    section[data-testid="stSidebar"] {{
+        background-color: #0b0b0f !important;
+        border-right: 1px solid rgba(255, 255, 255, 0.05) !important;
+    }}
+    
+    /* Expander styling */
+    div[data-testid="stExpander"] {{
+        background: rgba(255, 255, 255, 0.02) !important;
+        border: 1px solid rgba(255, 255, 255, 0.04) !important;
+        border-radius: 8px !important;
+    }}
+    
+    /* Dialog / Modal style */
+    div[data-testid="stDialog"] {{
+        background: #0f0f15 !important;
+        border: 1px solid rgba(255, 255, 255, 0.08) !important;
+        border-radius: 20px !important;
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6) !important;
+    }}
+    
+    /* Dataframe tables custom background for dark theme */
+    div[data-testid="stDataFrame"] {{
+        background-color: rgba(255, 255, 255, 0.02) !important;
+        border: 1px solid rgba(255, 255, 255, 0.05) !important;
+        border-radius: 12px !important;
+        overflow: hidden;
+    }}
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
 
 @st.dialog("Help & Instructions")
 def show_help_dialog():
@@ -309,13 +546,11 @@ def show_help_dialog():
     **Welcome to WatchMatch!**
     - **Step 1:** Enter your name and select your streaming services.
     - **Step 2:** Wait for your friends to join the same screen.
-    - **Step 3:** Pick a genre and start ranking movies.
+    - **Step 3:** Pick a genre (or select 'All') and pick one of the modes:
 
-    ### ?? Movie Ranking
-    - **Phase 1 (Ranking):** Choose up to 5 movies from the 24-card list and assign unique ranks from 1 to 5 to any subset you like.
-    - **Phase 2 (Final Vote):** The top-ranked movies are shown. Vote **Yes** to any movie you would watch. If everyone votes Yes, it's a match!
-
-    ---
+    ### 🎬 Modes
+    - **Movie Ranking (Social Match):** Choose up to 5 movies from the 24-card list and assign unique ranks from 1 to 5 to any subset you like. The top-ranked movies are shown for a final vote. If everyone votes Yes, it's a match!
+    - **Movie List (Quick Browse):** Quickly browse movies across the selected services and genre in a large 6x16 grid (96 movies at a time). Perfect for single-user discovery.
 
     ---
     
@@ -323,7 +558,6 @@ def show_help_dialog():
     - **H**: Show this help menu.
     - **L**: Open the ranked movie list for the active genre.
     - **R**: Open the reset dialog.
-    - **D**: Toggle Dark Mode.
     - **Spacebar**: Trigger a manual status refresh.
     """
     )
@@ -511,13 +745,11 @@ with st.sidebar.expander("ℹ️ Help & Instructions", expanded=False):
         **Welcome to WatchMatch!**
         - **Step 1:** Enter your name and select your streaming services.
         - **Step 2:** Wait for your friends to join the same screen.
-        - **Step 3:** Pick a genre and start ranking movies.
+        - **Step 3:** Pick a genre and pick a mode.
 
-        ### ?? Movie Ranking
-        - **Phase 1 (Ranking):** Choose up to 5 movies from the 24-card list and assign unique ranks from 1 to 5 to any subset you like.
-        - **Phase 2 (Final Vote):** Vote **Yes** to any movie you would watch. If everyone votes Yes, it's a match!
-
-        ---
+        ### 🎬 Modes
+        - **Movie Ranking:** Choose up to 5 movies from the 24-card list and assign unique ranks from 1 to 5 to any subset you like.
+        - **Movie List:** Browse movies across the selected services and genre in a large 6x16 grid (96 movies at a time).
 
         ---
         
@@ -525,7 +757,6 @@ with st.sidebar.expander("ℹ️ Help & Instructions", expanded=False):
         - **H**: Show help menu.
         - **L**: Open ranked list.
         - **R**: Open reset dialog.
-        - **D**: Toggle Dark Mode.
         - **Space**: Trigger status refresh.
         """
     )
@@ -534,27 +765,12 @@ with st.sidebar.expander("ℹ️ Help & Instructions", expanded=False):
 if st.sidebar.button("📊 Ranked Movie List", use_container_width=True, key="sidebar_ranked_list_btn"):
     show_movie_list_dialog()
 
-# Dark Mode Toggle (Default to True)
-if "dark_mode" not in st.session_state:
-    st.session_state.dark_mode = True
-
-dark_mode = st.sidebar.toggle("🌙 Dark Mode", value=st.session_state.dark_mode, key="sidebar_dark_mode")
-
-# Apply dark mode globally if active
-if dark_mode:
-    st.markdown(
-        """
-        <style>
-        html {
-            filter: invert(1) hue-rotate(180deg);
-        }
-        html img, html video, html iframe {
-            filter: invert(1) hue-rotate(180deg);
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
+# Platform Vibe theme selector
+st.sidebar.selectbox(
+    "🎨 Platform Vibe",
+    ["Netflix (Red)", "HBO Max (Purple)", "Prime Video (Blue)", "Apple TV+ (Glass)"],
+    key="sidebar_theme_style"
+)
 
 # Leave Session (only when logged in)
 if st.session_state.get("user_name"):
@@ -676,18 +892,22 @@ else:
                 st.error("No movies found for this combination of genre and streaming services.")
         st.caption("Rank 24 movies with 1-5 used only once each.")
 
+        if st.button("Movie List", type="secondary", key="setup_movie_list_btn"):
+            if not start_browsing(genre_name):
+                st.error("No movies found for this combination of genre and streaming services.")
+        st.caption("Browse a 6x16 grid of movies across your selected services (single-user quick discovery).")
+
         st.markdown("---")
         st.markdown("**Or browse the most popular movies across all genres:**")
-
-
-
-
-
-
-
-        if st.button("🎬 Any Genre — Rank & Vote", use_container_width=True):
-            if not start_matching("rating", None):
-                st.error("No movies found for your streaming services.")
+        any_col_a, any_col_b = st.columns(2)
+        with any_col_a:
+            if st.button("🎬 Any Genre — Rank & Vote", use_container_width=True):
+                if not start_matching("rating", None):
+                    st.error("No movies found for your streaming services.")
+        with any_col_b:
+            if st.button("🎬 Any Genre — Movie List", use_container_width=True):
+                if not start_browsing(None):
+                    st.error("No movies found for your streaming services.")
 
     elif lobby["state"] == "RATING":
         st.subheader(f"Genre: {lobby['genre'] or 'Any Genre'} - Phase 1: Movie Ranking")
@@ -714,6 +934,7 @@ else:
                 if i + j < len(movies_to_show):
                     movie = movies_to_show[i + j]
                     with cols[j]:
+                        st.markdown('<div class="movie-card-marker"></div>', unsafe_allow_html=True)
                         rank_number = i + j + 1
                         st.caption(
                             f"#{rank_number} · popularity {_safe_float(movie.get('popularity')):.1f} · votes {int(_safe_float(movie.get('vote_count')))}"
@@ -815,6 +1036,7 @@ else:
                 if i + j < len(top_movies):
                     movie = top_movies[i + j]
                     with cols[j]:
+                        st.markdown('<div class="movie-card-marker"></div>', unsafe_allow_html=True)
                         if movie.get("poster_path"):
                             st.image(f"{TMDB_IMAGE_BASE}{movie['poster_path']}", use_container_width=True)
                         else:
@@ -845,3 +1067,71 @@ else:
             if st.button("Start Over (Setup)"):
                 reset_lobby()
                 st.rerun()
+
+    elif lobby["state"] == "BROWSE":
+        region_code = lobby.get("region", "FI")
+        region_label = next((name for name, code in REGIONS.items() if code == region_code), "your region")
+        st.subheader(f"Genre: {lobby['genre'] or 'Any Genre'} - Browse Mode")
+        st.markdown(f"Quickly browse popular movies across your selected services in {region_label}.")
+
+        cursor = lobby.get("movie_cursor", 0)
+        movies_to_show = lobby.get("movie_pool", [])[cursor : cursor + 96]
+
+        if not movies_to_show:
+            st.info("No movies found.")
+            if st.button("Go Back to Setup"):
+                lobby["state"] = "SETUP"
+                st.rerun()
+            st.stop()
+
+        cols_per_row = 6
+        shared_service_names = get_combined_service_names()
+        show_service_names = len(shared_service_names) > 0
+
+        for i in range(0, len(movies_to_show), cols_per_row):
+            cols = st.columns(cols_per_row)
+            for j in range(cols_per_row):
+                if i + j < len(movies_to_show):
+                    movie = movies_to_show[i + j]
+                    with cols[j]:
+                        st.markdown('<div class="movie-card-marker"></div>', unsafe_allow_html=True)
+                        rank_num = cursor + i + j + 1
+                        st.caption(f"#{rank_num}")
+
+                        if show_service_names:
+                            available_services = [
+                                service_name
+                                for service_name in fetch_movie_watch_providers(movie["id"], region_code)
+                                if service_name in shared_service_names
+                            ]
+                            if available_services:
+                                st.caption(f"📺 {', '.join(available_services)}")
+                            else:
+                                st.caption("📺 N/A")
+
+                        if movie.get("poster_path"):
+                            st.image(f"{TMDB_IMAGE_BASE}{movie['poster_path']}", use_container_width=True)
+                        else:
+                            st.write("No poster available")
+
+                        st.markdown(f"**{movie.get('title', 'Untitled')}**")
+                        year = (movie.get("release_date", "") or "")[:4]
+                        rating = movie.get("vote_average", "N/A")
+                        st.caption(f"📅 {year}  ·  ⭐ {rating}")
+
+                        with st.expander("ℹ️ Details"):
+                            st.write(movie.get("overview", "No overview available."))
+
+        st.markdown("---")
+        nav_col1, nav_col2, nav_col3 = st.columns([1, 2, 1])
+        with nav_col1:
+            if cursor > 0:
+                if st.button("⬅️ Previous Page", use_container_width=True):
+                    load_prev_browse_page()
+        with nav_col2:
+            if st.button("⚙️ Back to Setup", use_container_width=True):
+                lobby["state"] = "SETUP"
+                st.rerun()
+        with nav_col3:
+            if st.button("Next Page ➡️", use_container_width=True):
+                load_next_browse_page()
