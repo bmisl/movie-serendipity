@@ -886,28 +886,20 @@ else:
 
         genre_keys = list(GENRES.keys())
         genre_name = st.selectbox("Genre", genre_keys)
+        # Treat "All" as None (no genre filter)
+        effective_genre = None if genre_name == "All" else genre_name
 
-        if st.button("Movie Ranking", type="primary", key="setup_movie_ranking_btn"):
-            if not start_matching("rating", genre_name):
-                st.error("No movies found for this combination of genre and streaming services.")
-        st.caption("Rank 24 movies with 1-5 used only once each.")
-
-        if st.button("Movie List", type="secondary", key="setup_movie_list_btn"):
-            if not start_browsing(genre_name):
-                st.error("No movies found for this combination of genre and streaming services.")
-        st.caption("Browse a 6x16 grid of movies across your selected services (single-user quick discovery).")
-
-        st.markdown("---")
-        st.markdown("**Or browse the most popular movies across all genres:**")
-        any_col_a, any_col_b = st.columns(2)
-        with any_col_a:
-            if st.button("🎬 Any Genre — Rank & Vote", use_container_width=True):
-                if not start_matching("rating", None):
-                    st.error("No movies found for your streaming services.")
-        with any_col_b:
-            if st.button("🎬 Any Genre — Movie List", use_container_width=True):
-                if not start_browsing(None):
-                    st.error("No movies found for your streaming services.")
+        mode_col_a, mode_col_b = st.columns(2)
+        with mode_col_a:
+            if st.button("Movie Ranking", type="primary", key="setup_movie_ranking_btn", use_container_width=True):
+                if not start_matching("rating", effective_genre):
+                    st.error("No movies found for this combination of genre and streaming services.")
+            st.caption("Rank up to 5 movies with unique ranks 1–5.")
+        with mode_col_b:
+            if st.button("Movie List", type="secondary", key="setup_movie_list_btn", use_container_width=True):
+                if not start_browsing(effective_genre):
+                    st.error("No movies found for this combination of genre and streaming services.")
+            st.caption("Browse 96 movies at a time (single-user discovery).")
 
     elif lobby["state"] == "RATING":
         st.subheader(f"Genre: {lobby['genre'] or 'Any Genre'} - Phase 1: Movie Ranking")
