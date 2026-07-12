@@ -387,8 +387,16 @@ st.markdown(
         color: #f5f5f7 !important;
     }}
     
-    /* Clean up top padding and hide default streamlit header/footer */
-    [data-testid="stHeader"], footer {{
+    /* Hide footer and the decorative top-right toolbar, but keep the sidebar toggle */
+    footer {{
+        display: none !important;
+    }}
+    [data-testid="stHeader"] {{
+        background: transparent !important;
+        border-bottom: none !important;
+    }}
+    /* Hide the Streamlit main menu and deploy button in the header toolbar */
+    [data-testid="stToolbar"] {{
         display: none !important;
     }}
     
