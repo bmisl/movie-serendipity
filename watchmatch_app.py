@@ -331,48 +331,72 @@ def fetch_movie_watch_providers(movie_id: int, region: str = "FI") -> List[str]:
 st.set_page_config(page_title="WatchMatch", layout="wide", initial_sidebar_state="expanded")
 
 # Theme Selection Configuration
-theme_style = st.session_state.get("sidebar_theme_style", "Netflix (Red)")
+theme_style = st.session_state.get("sidebar_theme_style", "Apple TV+ (Glass)")
 
 theme_configs = {
-    "Netflix (Red)": {
-        "bg": "radial-gradient(circle at top, #1c1010 0%, #0c0707 100%)",
-        "accent": "#e50914",
-        "accent_glow": "rgba(229, 9, 20, 0.4)",
-        "accent_glow_hover": "rgba(229, 9, 20, 0.6)",
-        "card_border_hover": "rgba(229, 9, 20, 0.4)",
-        "card_shadow_hover": "rgba(229, 9, 20, 0.2)",
-        "button_gradient": "linear-gradient(135deg, #e50914 0%, #b81d24 100%)"
-    },
-    "HBO Max (Purple)": {
-        "bg": "radial-gradient(circle at top, #161026 0%, #0a0712 100%)",
-        "accent": "#9933ff",
-        "accent_glow": "rgba(153, 51, 255, 0.4)",
-        "accent_glow_hover": "rgba(153, 51, 255, 0.6)",
-        "card_border_hover": "rgba(153, 51, 255, 0.4)",
-        "card_shadow_hover": "rgba(153, 51, 255, 0.2)",
-        "button_gradient": "linear-gradient(135deg, #9933ff 0%, #6600cc 100%)"
-    },
-    "Prime Video (Blue)": {
-        "bg": "radial-gradient(circle at top, #0f1721 0%, #05080c 100%)",
-        "accent": "#00a8e1",
-        "accent_glow": "rgba(0, 168, 225, 0.4)",
-        "accent_glow_hover": "rgba(0, 168, 225, 0.6)",
-        "card_border_hover": "rgba(0, 168, 225, 0.4)",
-        "card_shadow_hover": "rgba(0, 168, 225, 0.2)",
-        "button_gradient": "linear-gradient(135deg, #00a8e1 0%, #007eb9 100%)"
-    },
     "Apple TV+ (Glass)": {
         "bg": "radial-gradient(circle at top, #1e1e1e 0%, #0c0c0c 100%)",
-        "accent": "#ffffff",
+        "text_color": "#f5f5f7",
+        "subtitle_color": "#a1a1a6",
+        "heading_color": "#ffffff",
+        "sidebar_bg": "#0b0b0f",
+        "sidebar_border": "rgba(255,255,255,0.05)",
         "accent_glow": "rgba(255, 255, 255, 0.3)",
         "accent_glow_hover": "rgba(255, 255, 255, 0.5)",
-        "card_border_hover": "rgba(255, 255, 255, 0.4)",
-        "card_shadow_hover": "rgba(255, 255, 255, 0.15)",
-        "button_gradient": "linear-gradient(135deg, #555555 0%, #222222 100%)"
-    }
+        "card_bg": "rgba(255,255,255,0.03)",
+        "card_border": "rgba(255,255,255,0.05)",
+        "card_border_hover": "rgba(255,255,255,0.4)",
+        "card_shadow_hover": "rgba(255,255,255,0.15)",
+        "button_gradient": "linear-gradient(135deg, #555555 0%, #222222 100%)",
+        "secondary_btn_bg": "rgba(255,255,255,0.08)",
+        "secondary_btn_border": "rgba(255,255,255,0.12)",
+        "secondary_btn_color": "#ffffff",
+        "input_bg": "rgba(255,255,255,0.04)",
+        "input_border": "rgba(255,255,255,0.08)",
+        "input_color": "#ffffff",
+        "dialog_bg": "#0f0f15",
+        "dialog_border": "rgba(255,255,255,0.08)",
+        "segmented_bg": "rgba(0,0,0,0.25)",
+        "segmented_border": "rgba(255,255,255,0.08)",
+        "segmented_btn_color": "#a1a1a6",
+        "segmented_active_bg": "rgba(255,255,255,0.12)",
+        "segmented_active_color": "#ffffff",
+        "expander_bg": "rgba(255,255,255,0.02)",
+        "expander_border": "rgba(255,255,255,0.04)",
+    },
+    "Light": {
+        "bg": "linear-gradient(160deg, #f8f9fb 0%, #eef0f4 100%)",
+        "text_color": "#1a1a2e",
+        "subtitle_color": "#555566",
+        "heading_color": "#0f0f1a",
+        "sidebar_bg": "#f0f1f5",
+        "sidebar_border": "rgba(0,0,0,0.08)",
+        "accent_glow": "rgba(80, 80, 180, 0.2)",
+        "accent_glow_hover": "rgba(80, 80, 180, 0.35)",
+        "card_bg": "rgba(255,255,255,0.85)",
+        "card_border": "rgba(0,0,0,0.07)",
+        "card_border_hover": "rgba(80,80,180,0.3)",
+        "card_shadow_hover": "rgba(80,80,180,0.12)",
+        "button_gradient": "linear-gradient(135deg, #5050b4 0%, #3b3b8f 100%)",
+        "secondary_btn_bg": "rgba(0,0,0,0.05)",
+        "secondary_btn_border": "rgba(0,0,0,0.12)",
+        "secondary_btn_color": "#1a1a2e",
+        "input_bg": "rgba(255,255,255,0.9)",
+        "input_border": "rgba(0,0,0,0.12)",
+        "input_color": "#1a1a2e",
+        "dialog_bg": "#ffffff",
+        "dialog_border": "rgba(0,0,0,0.1)",
+        "segmented_bg": "rgba(0,0,0,0.06)",
+        "segmented_border": "rgba(0,0,0,0.1)",
+        "segmented_btn_color": "#555566",
+        "segmented_active_bg": "rgba(80,80,180,0.15)",
+        "segmented_active_color": "#3b3b8f",
+        "expander_bg": "rgba(255,255,255,0.7)",
+        "expander_border": "rgba(0,0,0,0.07)",
+    },
 }
 
-cfg = theme_configs.get(theme_style, theme_configs["Netflix (Red)"])
+cfg = theme_configs.get(theme_style, theme_configs["Apple TV+ (Glass)"])
 
 # Inject Custom Cinematic Dark CSS
 st.markdown(
@@ -384,60 +408,18 @@ st.markdown(
     html, body, [data-testid="stAppViewContainer"] {{
         font-family: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
         background: {cfg['bg']} !important;
-        color: #f5f5f7 !important;
+        color: {cfg['text_color']} !important;
     }}
     
-    /* Hide footer and decorative toolbar, but preserve sidebar controls */
+    /* Clean header and footer styling */
     footer {{
         display: none !important;
     }}
     [data-testid="stHeader"] {{
         background: transparent !important;
-        border-bottom: none !important;
-        pointer-events: none !important;
     }}
-    [data-testid="stHeader"] * {{
-        pointer-events: auto !important;
-    }}
-    /* Hide the Streamlit main menu and deploy button in the header toolbar */
     [data-testid="stToolbar"] {{
         display: none !important;
-    }}
-    
-    /* Always-visible Sidebar Toggle Control */
-    [data-testid="stSidebarCollapsedControl"],
-    [data-testid="stSidebarCollapseButton"],
-    [data-testid="collapsedControl"],
-    button[data-testid="collapsedControl"],
-    button[aria-label="Expand sidebar"],
-    button[aria-label="Toggle sidebar"] {{
-        display: flex !important;
-        visibility: visible !important;
-        opacity: 1 !important;
-        z-index: 999999 !important;
-        position: fixed !important;
-        top: 12px !important;
-        left: 12px !important;
-        background: rgba(30, 30, 45, 0.9) !important;
-        border: 1px solid rgba(255, 255, 255, 0.3) !important;
-        border-radius: 8px !important;
-        padding: 6px 10px !important;
-        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.6) !important;
-        color: #ffffff !important;
-        cursor: pointer !important;
-    }}
-    [data-testid="stSidebarCollapsedControl"]:hover,
-    [data-testid="stSidebarCollapseButton"]:hover,
-    button[data-testid="collapsedControl"]:hover {{
-        background: rgba(255, 255, 255, 0.25) !important;
-        border-color: rgba(255, 255, 255, 0.6) !important;
-    }}
-    [data-testid="stSidebarCollapsedControl"] svg,
-    [data-testid="stSidebarCollapseButton"] svg,
-    button[data-testid="collapsedControl"] svg {{
-        fill: #ffffff !important;
-        color: #ffffff !important;
-        stroke: #ffffff !important;
     }}
     
     /* Main block padding adjustment */
@@ -446,22 +428,26 @@ st.markdown(
         padding-bottom: 5rem !important;
     }}
     
-    /* Premium Title Header styling */
+    /* Heading styling */
     h1, h2, h3, h4, h5, h6 {{
         font-family: 'Outfit', sans-serif;
         font-weight: 600 !important;
         letter-spacing: -0.02em;
-        color: #ffffff !important;
+        color: {cfg['heading_color']} !important;
     }}
     
-    /* Subtitle styling */
+    /* Subtitle / paragraph styling */
     div[data-testid="stMarkdownContainer"] p {{
-        color: #a1a1a6;
+        color: {cfg['subtitle_color']} !important;
         font-size: 1.05rem;
     }}
     
-    /* Customize Streamlit Buttons */
-    /* Primary buttons (Vibrant gradient style) */
+    /* Labels */
+    label, .stSelectbox label, .stMultiSelect label, .stTextInput label {{
+        color: {cfg['text_color']} !important;
+    }}
+    
+    /* Primary buttons */
     div[data-testid="stButton"] button[kind="primary"] {{
         background: {cfg['button_gradient']} !important;
         border: none !important;
@@ -478,30 +464,30 @@ st.markdown(
         box-shadow: 0 6px 20px {cfg['accent_glow_hover']} !important;
     }}
     
-    /* Secondary/standard buttons (Apple TV+ Glass style) */
-    div[data-testid="stButton"] button[kind="secondary"] {{
-        background: rgba(255, 255, 255, 0.08) !important;
-        border: 1px solid rgba(255, 255, 255, 0.12) !important;
-        color: #ffffff !important;
+    /* Secondary buttons */
+    div[data-testid="stButton"] button[kind="secondary"],
+    div[data-testid="stButton"] button:not([kind]) {{
+        background: {cfg['secondary_btn_bg']} !important;
+        border: 1px solid {cfg['secondary_btn_border']} !important;
+        color: {cfg['secondary_btn_color']} !important;
         border-radius: 8px !important;
         font-weight: 500 !important;
         transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1) !important;
-        backdrop-filter: blur(8px);
         width: 100%;
     }}
-    div[data-testid="stButton"] button[kind="secondary"]:hover {{
-        background: rgba(255, 255, 255, 0.15) !important;
-        border-color: rgba(255, 255, 255, 0.25) !important;
+    div[data-testid="stButton"] button[kind="secondary"]:hover,
+    div[data-testid="stButton"] button:not([kind]):hover {{
+        opacity: 0.85 !important;
         transform: translateY(-1px) !important;
     }}
     
-    /* Movie Cards Container */
+    /* Movie Cards */
     div[data-testid="column"]:has(.movie-card-marker) {{
-        background: rgba(255, 255, 255, 0.03) !important;
-        border: 1px solid rgba(255, 255, 255, 0.05) !important;
+        background: {cfg['card_bg']} !important;
+        border: 1px solid {cfg['card_border']} !important;
         border-radius: 16px !important;
         padding: 16px !important;
-        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4) !important;
+        box-shadow: 0 4px 20px rgba(0,0,0,0.08) !important;
         backdrop-filter: blur(12px);
         transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1) !important;
     }}
@@ -509,75 +495,76 @@ st.markdown(
         transform: translateY(-6px) !important;
         border-color: {cfg['card_border_hover']} !important;
         box-shadow: 0 15px 35px {cfg['card_shadow_hover']} !important;
-        background: rgba(255, 255, 255, 0.05) !important;
     }}
     
-    /* Movie card image/poster styling */
+    /* Movie card images */
     div[data-testid="column"] img {{
         border-radius: 12px !important;
-        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3) !important;
+        box-shadow: 0 8px 24px rgba(0,0,0,0.15) !important;
         transition: transform 0.3s ease !important;
     }}
     
-    /* Input selection containers (Glassmorphism inputs) */
+    /* Inputs / Selects */
     div[data-baseweb="select"] > div {{
-        background-color: rgba(255, 255, 255, 0.04) !important;
-        border: 1px solid rgba(255, 255, 255, 0.08) !important;
+        background-color: {cfg['input_bg']} !important;
+        border: 1px solid {cfg['input_border']} !important;
         border-radius: 8px !important;
-        color: white !important;
+        color: {cfg['input_color']} !important;
     }}
-    
     div[data-baseweb="select"] span {{
-        color: white !important;
+        color: {cfg['input_color']} !important;
+    }}
+    input[data-testid="stTextInputField"], .stTextInput input {{
+        background: {cfg['input_bg']} !important;
+        color: {cfg['input_color']} !important;
+        border: 1px solid {cfg['input_border']} !important;
     }}
     
-    /* Segmented Control / Popcorn buttons styling */
+    /* Segmented Control */
     div[data-testid="stSegmentedControl"] {{
-        background: rgba(0, 0, 0, 0.25) !important;
+        background: {cfg['segmented_bg']} !important;
         border-radius: 8px !important;
-        border: 1px solid rgba(255, 255, 255, 0.08) !important;
+        border: 1px solid {cfg['segmented_border']} !important;
         padding: 2px !important;
     }}
-    
     div[data-testid="stSegmentedControl"] button {{
         background: transparent !important;
         border: none !important;
-        color: #a1a1a6 !important;
+        color: {cfg['segmented_btn_color']} !important;
         border-radius: 6px !important;
         transition: all 0.2s ease !important;
     }}
-    
     div[data-testid="stSegmentedControl"] button[aria-checked="true"] {{
-        background: rgba(255, 255, 255, 0.12) !important;
-        color: #ffffff !important;
-        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2) !important;
+        background: {cfg['segmented_active_bg']} !important;
+        color: {cfg['segmented_active_color']} !important;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.1) !important;
     }}
     
-    /* Sidebar custom styling */
+    /* Sidebar */
     section[data-testid="stSidebar"] {{
-        background-color: #0b0b0f !important;
-        border-right: 1px solid rgba(255, 255, 255, 0.05) !important;
+        background-color: {cfg['sidebar_bg']} !important;
+        border-right: 1px solid {cfg['sidebar_border']} !important;
     }}
     
-    /* Expander styling */
+    /* Expanders */
     div[data-testid="stExpander"] {{
-        background: rgba(255, 255, 255, 0.02) !important;
-        border: 1px solid rgba(255, 255, 255, 0.04) !important;
+        background: {cfg['expander_bg']} !important;
+        border: 1px solid {cfg['expander_border']} !important;
         border-radius: 8px !important;
     }}
     
-    /* Dialog / Modal style */
+    /* Dialog / Modal */
     div[data-testid="stDialog"] {{
-        background: #0f0f15 !important;
-        border: 1px solid rgba(255, 255, 255, 0.08) !important;
+        background: {cfg['dialog_bg']} !important;
+        border: 1px solid {cfg['dialog_border']} !important;
         border-radius: 20px !important;
-        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6) !important;
+        box-shadow: 0 20px 60px rgba(0,0,0,0.2) !important;
     }}
     
-    /* Dataframe tables custom background for dark theme */
+    /* Dataframe */
     div[data-testid="stDataFrame"] {{
-        background-color: rgba(255, 255, 255, 0.02) !important;
-        border: 1px solid rgba(255, 255, 255, 0.05) !important;
+        background-color: {cfg['card_bg']} !important;
+        border: 1px solid {cfg['card_border']} !important;
         border-radius: 12px !important;
         overflow: hidden;
     }}
@@ -606,6 +593,8 @@ def show_help_dialog():
     - **H**: Show this help menu.
     - **L**: Open the ranked movie list for the active genre.
     - **R**: Open the reset dialog.
+    - **D**: Toggle between dark (Apple TV+ Glass) and light theme.
+    - **M**: Toggle the sidebar open/closed.
     - **Spacebar**: Trigger a manual status refresh.
     """
     )
@@ -682,14 +671,26 @@ if st.button("HiddenReset"):
 if st.button("HiddenAutoRefresh"):
     st.rerun()
 
+if st.button("HiddenToggleTheme"):
+    current = st.session_state.get("sidebar_theme_style", "Apple TV+ (Glass)")
+    st.session_state["sidebar_theme_style"] = "Light" if current == "Apple TV+ (Glass)" else "Apple TV+ (Glass)"
+    st.rerun()
+
 
 components.html(
     """
     <script>
+    // Clear any stale collapsed state from browser's localStorage
+    try {
+        if (window.parent && window.parent.localStorage) {
+            window.parent.localStorage.removeItem("st_sidebar_state");
+            window.parent.localStorage.removeItem("stSidebarNav");
+        }
+    } catch(e) {}
+
     function bindShortcuts(doc) {
         if (!doc) return;
         if (doc.window_watchmatch_keys_bound) {
-            console.log("WatchMatch: Keys already bound to", doc.title || "document");
             return;
         }
 
@@ -727,12 +728,22 @@ components.html(
                     handled = true;
                 }
             } else if (key === 'd') {
-                const toggleLabel = Array.from(doc.querySelectorAll('label')).find(el => el.innerText && el.innerText.toLowerCase().includes('dark mode'));
-                if (toggleLabel) {
-                    toggleLabel.click();
+                const dBtn = buttons.find(b => b.innerText.includes('HiddenToggleTheme'));
+                if (dBtn) {
+                    dBtn.click();
                     handled = true;
-                } else {
-                    doc.documentElement.classList.toggle('custom-dark-mode');
+                }
+            } else if (key === 'm') {
+                const toggleBtn = doc.querySelector(
+                    '[data-testid="stSidebarCollapsedControl"], ' +
+                    '[data-testid="stSidebarCollapseButton"], ' +
+                    'button[data-testid="collapsedControl"], ' +
+                    'button[aria-label="Expand sidebar"], ' +
+                    'button[aria-label="Close sidebar"], ' +
+                    'button[aria-label="Toggle sidebar"]'
+                );
+                if (toggleBtn) {
+                    toggleBtn.click();
                     handled = true;
                 }
             }
@@ -745,7 +756,6 @@ components.html(
 
         doc.addEventListener('keydown', handleKey, false);
         doc.window_watchmatch_keys_bound = true;
-        console.log("WatchMatch: Successfully bound keyboard shortcuts to", doc.title || "document");
     }
 
     let parentDoc = null;
@@ -753,15 +763,34 @@ components.html(
         if (window.parent && window.parent.document) {
             parentDoc = window.parent.document;
         }
-    } catch (e) {
-        console.error("WatchMatch Error: Accessing parent document failed.", e);
-    }
+    } catch (e) {}
     const localDoc = document;
 
     [parentDoc, localDoc].forEach(bindShortcuts);
 
-    // Try to hide hidden buttons on parent if accessible, otherwise local
     const targetDoc = parentDoc || localDoc;
+
+    // Expand sidebar if collapsed
+    const ensureSidebarExpanded = () => {
+        if (!targetDoc) return;
+        const sidebar = targetDoc.querySelector('section[data-testid="stSidebar"]');
+        if (sidebar) {
+            const isCollapsed = window.getComputedStyle(sidebar).width === '0px' || 
+                                sidebar.getAttribute('aria-expanded') === 'false';
+            if (isCollapsed) {
+                const expandBtn = targetDoc.querySelector(
+                    '[data-testid="stSidebarCollapsedControl"], ' +
+                    '[data-testid="stSidebarCollapseButton"], ' +
+                    'button[data-testid="collapsedControl"], ' +
+                    'button[aria-label="Expand sidebar"], ' +
+                    'button[aria-label="Open sidebar"]'
+                );
+                if (expandBtn) expandBtn.click();
+            }
+        }
+    };
+    setTimeout(ensureSidebarExpanded, 150);
+
     const hideButtons = () => {
         const buttons = Array.from(targetDoc.querySelectorAll('button'));
         const hiddenButtons = buttons.filter(b => b.innerText.includes('Hidden'));
@@ -771,7 +800,6 @@ components.html(
         });
     };
     hideButtons();
-    // Run again after a small delay in case they take a moment to render
     setTimeout(hideButtons, 100);
     setTimeout(hideButtons, 500);
     </script>
@@ -805,6 +833,8 @@ with st.sidebar.expander("ℹ️ Help & Instructions", expanded=False):
         - **H**: Show help menu.
         - **L**: Open ranked list.
         - **R**: Open reset dialog.
+        - **D**: Toggle dark/light theme.
+        - **M**: Toggle sidebar.
         - **Space**: Trigger status refresh.
         """
     )
@@ -816,7 +846,7 @@ if st.sidebar.button("📊 Ranked Movie List", use_container_width=True, key="si
 # Platform Vibe theme selector
 st.sidebar.selectbox(
     "🎨 Platform Vibe",
-    ["Netflix (Red)", "HBO Max (Purple)", "Prime Video (Blue)", "Apple TV+ (Glass)"],
+    ["Apple TV+ (Glass)", "Light"],
     key="sidebar_theme_style"
 )
 
@@ -844,10 +874,13 @@ st.title("🍿 WatchMatch")
 region_label = next((name for name, code in REGIONS.items() if code == lobby.get("region", "FI")), "your region")
 st.markdown(f"Find the perfect movie for your group, available on your streaming services in {region_label}!")
 
-refresh_col, _ = st.columns([1, 5])
+refresh_col, menu_col, _ = st.columns([1.2, 1.8, 5])
 with refresh_col:
-    if st.button("Refresh", key="top_refresh_button"):
+    if st.button("🔄 Refresh", key="top_refresh_button"):
         st.rerun()
+with menu_col:
+    if st.button("📊 Ranked List", key="top_ranked_list_btn"):
+        show_movie_list_dialog()
 
 if "user_name" not in st.session_state:
     st.session_state.user_name = None
