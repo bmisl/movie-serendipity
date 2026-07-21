@@ -328,7 +328,7 @@ def fetch_movie_watch_providers(movie_id: int, region: str = "FI") -> List[str]:
         return []
 
 
-st.set_page_config(page_title="WatchMatch", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="WatchMatch", layout="wide", initial_sidebar_state="expanded")
 
 # Theme Selection Configuration
 theme_style = st.session_state.get("sidebar_theme_style", "Netflix (Red)")
@@ -387,17 +387,57 @@ st.markdown(
         color: #f5f5f7 !important;
     }}
     
-    /* Hide footer and the decorative top-right toolbar, but keep the sidebar toggle */
+    /* Hide footer and decorative toolbar, but preserve sidebar controls */
     footer {{
         display: none !important;
     }}
     [data-testid="stHeader"] {{
         background: transparent !important;
         border-bottom: none !important;
+        pointer-events: none !important;
+    }}
+    [data-testid="stHeader"] * {{
+        pointer-events: auto !important;
     }}
     /* Hide the Streamlit main menu and deploy button in the header toolbar */
     [data-testid="stToolbar"] {{
         display: none !important;
+    }}
+    
+    /* Always-visible Sidebar Toggle Control */
+    [data-testid="stSidebarCollapsedControl"],
+    [data-testid="stSidebarCollapseButton"],
+    [data-testid="collapsedControl"],
+    button[data-testid="collapsedControl"],
+    button[aria-label="Expand sidebar"],
+    button[aria-label="Toggle sidebar"] {{
+        display: flex !important;
+        visibility: visible !important;
+        opacity: 1 !important;
+        z-index: 999999 !important;
+        position: fixed !important;
+        top: 12px !important;
+        left: 12px !important;
+        background: rgba(30, 30, 45, 0.9) !important;
+        border: 1px solid rgba(255, 255, 255, 0.3) !important;
+        border-radius: 8px !important;
+        padding: 6px 10px !important;
+        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.6) !important;
+        color: #ffffff !important;
+        cursor: pointer !important;
+    }}
+    [data-testid="stSidebarCollapsedControl"]:hover,
+    [data-testid="stSidebarCollapseButton"]:hover,
+    button[data-testid="collapsedControl"]:hover {{
+        background: rgba(255, 255, 255, 0.25) !important;
+        border-color: rgba(255, 255, 255, 0.6) !important;
+    }}
+    [data-testid="stSidebarCollapsedControl"] svg,
+    [data-testid="stSidebarCollapseButton"] svg,
+    button[data-testid="collapsedControl"] svg {{
+        fill: #ffffff !important;
+        color: #ffffff !important;
+        stroke: #ffffff !important;
     }}
     
     /* Main block padding adjustment */
