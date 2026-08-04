@@ -71,11 +71,14 @@ def tmdb_get(path: str, params: Optional[Dict[str, object]] = None, retries: int
             response = requests.get(
                 f"{BASE}{path}", params=payload, timeout=REQUEST_TIMEOUT
             )
+            # 404 means the resource doesn't exist — no point retrying
+            if response.status_code == 404:
+                return {}
             response.raise_for_status()
             return response.json()
         except requests.RequestException:
             if attempt == retries - 1:
-                print(f"⚠️  TMDB request failed: {path}")
+                print(f"[WARN] TMDB request failed: {path}")
                 return {}
             time.sleep(REQUEST_DELAY * (attempt + 1))
     return {}
@@ -206,6 +209,14 @@ def create_tables(conn: "sqlite3.Connection") -> None:
         language_code TEXT,
         language_name TEXT,
         PRIMARY KEY (movie_id, language_code)
+    );
+    CREATE TABLE IF NOT EXISTS movie_providers (
+        movie_id INTEGER,
+        region TEXT,
+        provider_id INTEGER,
+        provider_name TEXT,
+        provider_type TEXT,
+        PRIMARY KEY (movie_id, region, provider_id, provider_type)
     );
     """
     )
@@ -526,6 +537,36 @@ def insert_languages(
         )
 
 
+def fetch_watch_providers(movie_id: int) -> dict:
+    """Return the raw TMDB watch/providers results dict keyed by region code."""
+    payload = tmdb_get(f"/movie/{movie_id}/watch/providers")
+    time.sleep(REQUEST_DELAY)
+    return payload.get("results", {})
+
+
+def insert_providers(
+    cur: "sqlite3.Cursor",
+    movie_id: int,
+    providers_by_region: dict,
+    regions: Sequence[str],
+) -> None:
+    """Store flatrate/free/ads provider rows for the requested regions."""
+    for region in regions:
+        region_data = providers_by_region.get(region, {})
+        for bucket in ("flatrate", "free", "ads", "rent", "buy"):
+            for entry in region_data.get(bucket, []) or []:
+                pid = entry.get("provider_id")
+                name = entry.get("provider_name", "")
+                if pid is None:
+                    continue
+                cur.execute(
+                    "INSERT OR REPLACE INTO movie_providers "
+                    "(movie_id, region, provider_id, provider_name, provider_type) "
+                    "VALUES (?,?,?,?,?)",
+                    (movie_id, region, pid, name, bucket),
+                )
+
+
 def determine_years(args: argparse.Namespace) -> List[int]:
     if args.year:
         unique_years = sorted({year for year in args.year if year}, reverse=True)
@@ -752,6 +793,8 @@ def main() -> None:
             insert_companies(cur, movie["id"], detail.get("production_companies"))
             insert_genres(cur, movie["id"], detail.get("genres"))
             insert_languages(cur, movie["id"], detail.get("spoken_languages"))
+            providers_by_region = fetch_watch_providers(movie["id"])
+            insert_providers(cur, movie["id"], providers_by_region, list(REGION_PROVIDERS.keys()))
             conn.commit()
             collected.add(movie["id"])
             missing_genres.discard(movie["id"])

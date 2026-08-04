@@ -5,6 +5,8 @@ import requests
 import streamlit as st
 import streamlit.components.v1 as components
 
+from app_config import GENRES, REGION_PROVIDERS, REGIONS
+
 # Fetch TMDB API key from secrets
 try:
     TMDB_API_KEY = st.secrets["TMDB_API_KEY"]
@@ -19,45 +21,7 @@ RANK_BATCH_SIZE = 24
 LIST_BATCH_SIZE = 50
 MATCH_POOL_SIZE = 120
 
-REGION_PROVIDERS = {
-    "FI": {
-        "Netflix": 8, "Amazon Prime Video": 119, "Disney Plus": 337,
-        "HBO Max": 1899, "Viaplay": 76, "Apple TV+": 350,
-        "Ruutu": 338, "Yle Areena": 323, "Viddla": 539
-    },
-    "DK": {
-        "Netflix": 8, "Amazon Prime Video": 119, "Disney Plus": 337,
-        "HBO Max": 1899, "Viaplay": 76, "Apple TV+": 350,
-        "TV 2 Play": 398, "DRTV": 620
-    },
-    "IS": {
-        "Netflix": 8, "Amazon Prime Video": 119, "Disney Plus": 337,
-        "HBO Max": 1899, "Viaplay": 76, "Apple TV+": 350,
-        "RÚV": 2674
-    }
-}
-
-GENRES = {
-    "All": None,
-    "Action": 28,
-    "Adventure": 12,
-    "Animation": 16,
-    "Comedy": 35,
-    "Crime": 80,
-    "Documentary": 99,
-    "Drama": 18,
-    "Fantasy": 14,
-    "Horror": 27,
-    "Romance": 10749,
-    "Sci-Fi": 878,
-    "Thriller": 53,
-}
-
-REGIONS = {
-    "Finland": "FI",
-    "Denmark": "DK",
-    "Iceland": "IS",
-}
+# REGIONS, REGION_PROVIDERS, and GENRES are imported from app_config
 
 
 @st.cache_resource
@@ -261,7 +225,7 @@ def auto_refresh_page(interval_ms: int = 5000) -> None:
         setTimeout(function() {{
             const doc = window.parent.document;
             const buttons = Array.from(doc.querySelectorAll('button'));
-            const refreshBtn = buttons.find(b => b.innerText.includes('HiddenAutoRefresh'));
+            const refreshBtn = buttons.find(b => b.innerText.trim() === 'Auto Refresh' || b.innerText.includes('Auto Refresh'));
             if (refreshBtn) {{
                 refreshBtn.click();
             }}
@@ -330,369 +294,29 @@ def fetch_movie_watch_providers(movie_id: int, region: str = "FI") -> List[str]:
 
 st.set_page_config(page_title="WatchMatch", layout="wide", initial_sidebar_state="expanded")
 
-# Theme Selection Configuration
-theme_style = st.session_state.get("sidebar_theme_style", "Apple TV+ (Glass)")
-
-theme_configs = {
-    "Apple TV+ (Glass)": {
-        "bg": "radial-gradient(circle at top, #1e1e1e 0%, #0c0c0c 100%)",
-        "text_color": "#f5f5f7",
-        "subtitle_color": "#a1a1a6",
-        "heading_color": "#ffffff",
-        "sidebar_bg": "#0b0b0f",
-        "sidebar_border": "rgba(255,255,255,0.05)",
-        "accent_glow": "rgba(255, 255, 255, 0.3)",
-        "accent_glow_hover": "rgba(255, 255, 255, 0.5)",
-        "card_bg": "rgba(255,255,255,0.03)",
-        "card_border": "rgba(255,255,255,0.05)",
-        "card_border_hover": "rgba(255,255,255,0.4)",
-        "card_shadow_hover": "rgba(255,255,255,0.15)",
-        "button_gradient": "linear-gradient(135deg, #555555 0%, #222222 100%)",
-        "secondary_btn_bg": "rgba(255,255,255,0.08)",
-        "secondary_btn_border": "rgba(255,255,255,0.12)",
-        "secondary_btn_color": "#ffffff",
-        "input_bg": "rgba(255,255,255,0.04)",
-        "input_border": "rgba(255,255,255,0.08)",
-        "input_color": "#ffffff",
-        "dialog_bg": "#0f0f15",
-        "dialog_border": "rgba(255,255,255,0.08)",
-        "segmented_bg": "rgba(0,0,0,0.25)",
-        "segmented_border": "rgba(255,255,255,0.08)",
-        "segmented_btn_color": "#a1a1a6",
-        "segmented_active_bg": "rgba(255,255,255,0.12)",
-        "segmented_active_color": "#ffffff",
-        "expander_bg": "rgba(255,255,255,0.02)",
-        "expander_border": "rgba(255,255,255,0.04)",
-    },
-    "Light": {
-        "bg": "linear-gradient(160deg, #f8f9fb 0%, #eef0f4 100%)",
-        "text_color": "#1a1a2e",
-        "subtitle_color": "#555566",
-        "heading_color": "#0f0f1a",
-        "sidebar_bg": "#f0f1f5",
-        "sidebar_border": "rgba(0,0,0,0.08)",
-        "accent_glow": "rgba(80, 80, 180, 0.2)",
-        "accent_glow_hover": "rgba(80, 80, 180, 0.35)",
-        "card_bg": "rgba(255,255,255,0.85)",
-        "card_border": "rgba(0,0,0,0.07)",
-        "card_border_hover": "rgba(80,80,180,0.3)",
-        "card_shadow_hover": "rgba(80,80,180,0.12)",
-        "button_gradient": "linear-gradient(135deg, #5050b4 0%, #3b3b8f 100%)",
-        "secondary_btn_bg": "rgba(0,0,0,0.05)",
-        "secondary_btn_border": "rgba(0,0,0,0.12)",
-        "secondary_btn_color": "#1a1a2e",
-        "input_bg": "rgba(255,255,255,0.9)",
-        "input_border": "rgba(0,0,0,0.12)",
-        "input_color": "#1a1a2e",
-        "dialog_bg": "#ffffff",
-        "dialog_border": "rgba(0,0,0,0.1)",
-        "segmented_bg": "rgba(0,0,0,0.06)",
-        "segmented_border": "rgba(0,0,0,0.1)",
-        "segmented_btn_color": "#555566",
-        "segmented_active_bg": "rgba(80,80,180,0.15)",
-        "segmented_active_color": "#3b3b8f",
-        "expander_bg": "rgba(255,255,255,0.7)",
-        "expander_border": "rgba(0,0,0,0.07)",
-    },
-}
-
-cfg = theme_configs.get(theme_style, theme_configs["Apple TV+ (Glass)"])
-
-# Inject Custom Cinematic Dark CSS
+# Standard Streamlit theme layout
 st.markdown(
-    f"""
+    """
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap');
-    
-    /* Apply premium typography and background */
-    html, body, [data-testid="stAppViewContainer"] {{
-        font-family: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-        background: {cfg['bg']} !important;
-        color: {cfg['text_color']} !important;
-    }}
-    
-    /* Clean header and footer styling */
-    footer {{
+    section[data-testid="stSidebar"] div[data-testid="stButton"]:has(button[key*="hidden_"]),
+    div[data-testid="stButton"]:has(button[aria-label*="Hidden"]),
+    div[data-testid="stButton"]:has(button:contains("Hidden")) {
         display: none !important;
-    }}
-    [data-testid="stHeader"] {{
-        background: transparent !important;
-    }}
-    [data-testid="stToolbar"] {{
-        display: none !important;
-    }}
-    
-    /* Main block padding adjustment */
-    [data-testid="stAppViewBlockContainer"] {{
-        padding-top: 2rem !important;
-        padding-bottom: 5rem !important;
-    }}
-    
-    /* Heading styling */
-    h1, h2, h3, h4, h5, h6 {{
-        font-family: 'Outfit', sans-serif;
-        font-weight: 600 !important;
-        letter-spacing: -0.02em;
-        color: {cfg['heading_color']} !important;
-    }}
-    
-    /* Subtitle / paragraph styling */
-    div[data-testid="stMarkdownContainer"] p {{
-        color: {cfg['subtitle_color']} !important;
-        font-size: 1.05rem;
-    }}
-    
-    /* Labels */
-    label, .stSelectbox label, .stMultiSelect label, .stTextInput label {{
-        color: {cfg['text_color']} !important;
-    }}
-    
-    /* Primary buttons */
-    div[data-testid="stButton"] button[kind="primary"] {{
-        background: {cfg['button_gradient']} !important;
-        border: none !important;
-        color: white !important;
-        font-weight: 600 !important;
-        border-radius: 8px !important;
-        box-shadow: 0 4px 15px {cfg['accent_glow']} !important;
-        transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1) !important;
-        padding: 0.5rem 1.5rem !important;
-        width: 100%;
-    }}
-    div[data-testid="stButton"] button[kind="primary"]:hover {{
-        transform: translateY(-2px) !important;
-        box-shadow: 0 6px 20px {cfg['accent_glow_hover']} !important;
-    }}
-    
-    /* Secondary buttons */
-    div[data-testid="stButton"] button[kind="secondary"],
-    div[data-testid="stButton"] button:not([kind]) {{
-        background: {cfg['secondary_btn_bg']} !important;
-        border: 1px solid {cfg['secondary_btn_border']} !important;
-        color: {cfg['secondary_btn_color']} !important;
-        border-radius: 8px !important;
-        font-weight: 500 !important;
-        transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1) !important;
-        width: 100%;
-    }}
-    div[data-testid="stButton"] button[kind="secondary"]:hover,
-    div[data-testid="stButton"] button:not([kind]):hover {{
-        opacity: 0.85 !important;
-        transform: translateY(-1px) !important;
-    }}
-    
-    /* Movie Cards */
-    div[data-testid="column"]:has(.movie-card-marker) {{
-        background: {cfg['card_bg']} !important;
-        border: 1px solid {cfg['card_border']} !important;
-        border-radius: 16px !important;
-        padding: 16px !important;
-        box-shadow: 0 4px 20px rgba(0,0,0,0.08) !important;
-        backdrop-filter: blur(12px);
-        transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1) !important;
-    }}
-    div[data-testid="column"]:has(.movie-card-marker):hover {{
-        transform: translateY(-6px) !important;
-        border-color: {cfg['card_border_hover']} !important;
-        box-shadow: 0 15px 35px {cfg['card_shadow_hover']} !important;
-    }}
-    
-    /* Movie card images */
-    div[data-testid="column"] img {{
-        border-radius: 12px !important;
-        box-shadow: 0 8px 24px rgba(0,0,0,0.15) !important;
-        transition: transform 0.3s ease !important;
-    }}
-    
-    /* Inputs / Selects */
-    div[data-baseweb="select"] > div {{
-        background-color: {cfg['input_bg']} !important;
-        border: 1px solid {cfg['input_border']} !important;
-        border-radius: 8px !important;
-        color: {cfg['input_color']} !important;
-    }}
-    div[data-baseweb="select"] span {{
-        color: {cfg['input_color']} !important;
-    }}
-    input[data-testid="stTextInputField"], .stTextInput input {{
-        background: {cfg['input_bg']} !important;
-        color: {cfg['input_color']} !important;
-        border: 1px solid {cfg['input_border']} !important;
-    }}
-    
-    /* Segmented Control */
-    div[data-testid="stSegmentedControl"] {{
-        background: {cfg['segmented_bg']} !important;
-        border-radius: 8px !important;
-        border: 1px solid {cfg['segmented_border']} !important;
-        padding: 2px !important;
-    }}
-    div[data-testid="stSegmentedControl"] button {{
-        background: transparent !important;
-        border: none !important;
-        color: {cfg['segmented_btn_color']} !important;
-        border-radius: 6px !important;
-        transition: all 0.2s ease !important;
-    }}
-    div[data-testid="stSegmentedControl"] button[aria-checked="true"] {{
-        background: {cfg['segmented_active_bg']} !important;
-        color: {cfg['segmented_active_color']} !important;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.1) !important;
-    }}
-    
-    /* Sidebar */
-    section[data-testid="stSidebar"] {{
-        background-color: {cfg['sidebar_bg']} !important;
-        border-right: 1px solid {cfg['sidebar_border']} !important;
-    }}
-    
-    /* Expanders */
-    div[data-testid="stExpander"] {{
-        background: {cfg['expander_bg']} !important;
-        border: 1px solid {cfg['expander_border']} !important;
-        border-radius: 8px !important;
-    }}
-    
-    /* Dialog / Modal */
-    div[data-testid="stDialog"] {{
-        background: {cfg['dialog_bg']} !important;
-        border: 1px solid {cfg['dialog_border']} !important;
-        border-radius: 20px !important;
-        box-shadow: 0 20px 60px rgba(0,0,0,0.2) !important;
-    }}
-    
-    /* Dataframe */
-    div[data-testid="stDataFrame"] {{
-        background-color: {cfg['card_bg']} !important;
-        border: 1px solid {cfg['card_border']} !important;
-        border-radius: 12px !important;
-        overflow: hidden;
-    }}
+        height: 0px !important;
+        margin: 0px !important;
+        padding: 0px !important;
+    }
     </style>
     """,
     unsafe_allow_html=True
 )
 
-
-@st.dialog("Help & Instructions")
-def show_help_dialog():
-    st.markdown(
-        """
-    **Welcome to WatchMatch!**
-    - **Step 1:** Enter your name and select your streaming services.
-    - **Step 2:** Wait for your friends to join the same screen.
-    - **Step 3:** Pick a genre (or select 'All') and pick one of the modes:
-
-    ### 🎬 Modes
-    - **Movie Ranking (Social Match):** Choose up to 5 movies from the 24-card list and assign unique ranks from 1 to 5 to any subset you like. The top-ranked movies are shown for a final vote. If everyone votes Yes, it's a match!
-    - **Movie List (Quick Browse):** Quickly browse movies across the selected services and genre in a large 6x16 grid (96 movies at a time). Perfect for single-user discovery.
-
-    ---
-    
-    *Keyboard Shortcuts:*
-    - **H**: Show this help menu.
-    - **L**: Open the ranked movie list for the active genre.
-    - **R**: Open the reset dialog.
-    - **D**: Toggle between dark (Apple TV+ Glass) and light theme.
-    - **M**: Toggle the sidebar open/closed.
-    - **Spacebar**: Trigger a manual status refresh.
-    """
-    )
-
-
-if st.button("HiddenHelp"):
-    show_help_dialog()
-
-
-@st.dialog("Ranked Movie List", width="large")
-def show_movie_list_dialog():
-    region = lobby.get("region", "FI")
-    provider_ids = get_combined_provider_ids()
-    sort_by = st.radio("Sort by", ["📈 Popularity", "⭐ TMDB Rating"], horizontal=True)
-
-    with st.spinner("Fetching ranked movies and checking streaming services..."):
-        try:
-            genre_id = GENRES[lobby["genre"]] if lobby.get("genre") else None
-            ranked_movies = fetch_ranked_movies(genre_id, provider_ids, LIST_BATCH_SIZE, region)
-        except Exception:
-            ranked_movies = []
-
-        if not ranked_movies:
-            st.info("No movies found for the selected criteria and streaming services.")
-            return
-
-        if "TMDB Rating" in sort_by:
-            ranked_movies = sorted(ranked_movies, key=lambda m: _safe_float(m.get("vote_average"), -1), reverse=True)
-
-        shared_services = get_combined_service_names()
-        rows = []
-        for rank, movie in enumerate(ranked_movies, start=1):
-            # Resolve one available service for the movie
-            providers = fetch_movie_watch_providers(movie["id"], region)
-            available_on = [p for p in providers if p in shared_services]
-            service = ", ".join(available_on) if available_on else "N/A"
-
-            rows.append(
-                {
-                    "Rank": rank,
-                    "Title": movie.get("title", "Untitled"),
-                    "Streaming Service": service,
-                    "Popularity": round(_safe_float(movie.get("popularity")), 2),
-                    "TMDB Rating": movie.get("vote_average", "N/A"),
-                    "Year": (movie.get("release_date", "") or "")[:4],
-                }
-            )
-
-    sort_label = "TMDB Rating" if "TMDB Rating" in sort_by else "Popularity"
-    genre_text = f"'{lobby['genre']}'" if lobby.get("genre") else "Any Genre"
-    st.caption(f"Showing the top {min(LIST_BATCH_SIZE, len(ranked_movies))} movies sorted by {sort_label} for {genre_text} and shared streaming services.")
-    st.dataframe(rows, use_container_width=True, hide_index=True)
-
-
-@st.dialog("Reset WatchMatch")
-def show_reset_dialog():
-    st.warning("This clears all active users, votes, and the current match.")
-    confirmation = st.text_input("Type reset to confirm", key="reset_confirmation")
-    if st.button("Reset everything", type="primary"):
-        if confirmation.strip().lower() == "reset":
-            reset_lobby()
-            st.rerun()
-        else:
-            st.error("Type reset exactly to confirm.")
-
-
-if st.button("HiddenMovieList"):
-    show_movie_list_dialog()
-
-
-if st.button("HiddenReset"):
-    show_reset_dialog()
-
-if st.button("HiddenAutoRefresh"):
-    st.rerun()
-
-if st.button("HiddenToggleTheme"):
-    current = st.session_state.get("sidebar_theme_style", "Apple TV+ (Glass)")
-    st.session_state["sidebar_theme_style"] = "Light" if current == "Apple TV+ (Glass)" else "Apple TV+ (Glass)"
-    st.rerun()
-
-
 components.html(
     """
     <script>
-    // Clear any stale collapsed state from browser's localStorage
-    try {
-        if (window.parent && window.parent.localStorage) {
-            window.parent.localStorage.removeItem("st_sidebar_state");
-            window.parent.localStorage.removeItem("stSidebarNav");
-        }
-    } catch(e) {}
-
     function bindShortcuts(doc) {
         if (!doc) return;
-        if (doc.window_watchmatch_keys_bound) {
-            return;
-        }
+        if (doc.window_watchmatch_keys_bound) return;
 
         const handleKey = function(e) {
             const targetTag = (e.target && e.target.tagName) ? e.target.tagName : "";
@@ -700,37 +324,30 @@ components.html(
 
             const key = (e.key || '').toLowerCase();
             const buttons = Array.from(doc.querySelectorAll('button'));
-
             let handled = false;
 
             if (key === ' ' || e.code === 'Space' || e.key === 'Spacebar') {
-                const refreshBtn = buttons.find(b => b.innerText.includes('HiddenAutoRefresh'));
+                const refreshBtn = buttons.find(b => b.innerText.trim() === 'Auto Refresh' || b.innerText.includes('Auto Refresh'));
                 if (refreshBtn) {
                     refreshBtn.click();
                     handled = true;
                 }
             } else if (key === 'h') {
-                const hBtn = buttons.find(b => b.innerText.includes('HiddenHelp'));
+                const hBtn = buttons.find(b => b.innerText.trim() === 'Help' || b.innerText.includes('Help'));
                 if (hBtn) {
                     hBtn.click();
                     handled = true;
                 }
             } else if (key === 'l') {
-                const lBtn = buttons.find(b => b.innerText.includes('HiddenMovieList'));
+                const lBtn = buttons.find(b => b.innerText.includes('Movie List'));
                 if (lBtn) {
                     lBtn.click();
                     handled = true;
                 }
             } else if (key === 'r') {
-                const rBtn = buttons.find(b => b.innerText.includes('HiddenReset'));
+                const rBtn = buttons.find(b => b.innerText.trim() === 'Reset' || b.innerText.includes('Reset'));
                 if (rBtn) {
                     rBtn.click();
-                    handled = true;
-                }
-            } else if (key === 'd') {
-                const dBtn = buttons.find(b => b.innerText.includes('HiddenToggleTheme'));
-                if (dBtn) {
-                    dBtn.click();
                     handled = true;
                 }
             } else if (key === 'm') {
@@ -767,88 +384,108 @@ components.html(
     const localDoc = document;
 
     [parentDoc, localDoc].forEach(bindShortcuts);
-
-    const targetDoc = parentDoc || localDoc;
-
-    // Expand sidebar if collapsed
-    const ensureSidebarExpanded = () => {
-        if (!targetDoc) return;
-        const sidebar = targetDoc.querySelector('section[data-testid="stSidebar"]');
-        if (sidebar) {
-            const isCollapsed = window.getComputedStyle(sidebar).width === '0px' || 
-                                sidebar.getAttribute('aria-expanded') === 'false';
-            if (isCollapsed) {
-                const expandBtn = targetDoc.querySelector(
-                    '[data-testid="stSidebarCollapsedControl"], ' +
-                    '[data-testid="stSidebarCollapseButton"], ' +
-                    'button[data-testid="collapsedControl"], ' +
-                    'button[aria-label="Expand sidebar"], ' +
-                    'button[aria-label="Open sidebar"]'
-                );
-                if (expandBtn) expandBtn.click();
-            }
-        }
-    };
-    setTimeout(ensureSidebarExpanded, 150);
-
-    const hideButtons = () => {
-        const buttons = Array.from(targetDoc.querySelectorAll('button'));
-        const hiddenButtons = buttons.filter(b => b.innerText.includes('Hidden'));
-        hiddenButtons.forEach(btn => {
-            const btnContainer = btn.closest('div[data-testid="stButton"]');
-            if (btnContainer) btnContainer.style.display = 'none';
-        });
-    };
-    hideButtons();
-    setTimeout(hideButtons, 100);
-    setTimeout(hideButtons, 500);
     </script>
     """,
-    height=1,
+    height=0,
+    width=0,
 )
 
 
 
-# ==========================================
-# Sidebar Menu
-# ==========================================
-st.sidebar.title("🍿 WatchMatch Menu")
-
-# Help & Instructions Expander
-with st.sidebar.expander("ℹ️ Help & Instructions", expanded=False):
+@st.dialog("Help & Instructions")
+def show_help_dialog():
     st.markdown(
         """
-        **Welcome to WatchMatch!**
-        - **Step 1:** Enter your name and select your streaming services.
-        - **Step 2:** Wait for your friends to join the same screen.
-        - **Step 3:** Pick a genre and pick a mode.
+    **Welcome to WatchMatch!**
+    - **Step 1:** Enter your name and select your streaming services.
+    - **Step 2:** Wait for your friends to join the same screen.
+    - **Step 3:** Pick a genre (or select 'All') and pick one of the modes:
 
-        ### 🎬 Modes
-        - **Movie Ranking:** Choose up to 5 movies from the 24-card list and assign unique ranks from 1 to 5 to any subset you like.
-        - **Movie List:** Browse movies across the selected services and genre in a large 6x16 grid (96 movies at a time).
+    ### 🎬 Modes
+    - **Movie Ranking (Social Match):** Choose up to 5 movies from the 24-card list and assign unique ranks from 1 to 5 to any subset you like. The top-ranked movies are shown for a final vote. If everyone votes Yes, it's a match!
+    - **Movie List (Quick Browse):** Quickly browse movies across the selected services and genre in a large 6x16 grid (96 movies at a time). Perfect for single-user discovery.
 
-        ---
-        
-        *Keyboard Shortcuts (PC):*
-        - **H**: Show help menu.
-        - **L**: Open ranked list.
-        - **R**: Open reset dialog.
-        - **D**: Toggle dark/light theme.
-        - **M**: Toggle sidebar.
-        - **Space**: Trigger status refresh.
-        """
+    ---
+    
+    *Keyboard Shortcuts:*
+    - **H**: Show this help menu.
+    - **L**: Open the ranked movie list for the active genre.
+    - **M**: Toggle the sidebar open/closed.
+    - **Spacebar**: Trigger a manual status refresh.
+    """
     )
 
-# Ranked Movie List Button
-if st.sidebar.button("📊 Ranked Movie List", use_container_width=True, key="sidebar_ranked_list_btn"):
-    show_movie_list_dialog()
 
-# Platform Vibe theme selector
-st.sidebar.selectbox(
-    "🎨 Platform Vibe",
-    ["Apple TV+ (Glass)", "Light"],
-    key="sidebar_theme_style"
-)
+@st.dialog("Ranked Movie List", width="large")
+def show_movie_list_dialog():
+    region = lobby.get("region", "FI")
+    provider_ids = get_combined_provider_ids()
+    sort_by = st.radio("Sort by", ["📈 Popularity", "⭐ TMDB Rating"], horizontal=True)
+
+    with st.spinner("Fetching ranked movies and checking streaming services..."):
+        try:
+            genre_id = GENRES[lobby["genre"]] if lobby.get("genre") else None
+            ranked_movies = fetch_ranked_movies(genre_id, provider_ids, LIST_BATCH_SIZE, region)
+        except Exception:
+            ranked_movies = []
+
+        if not ranked_movies:
+            st.info("No movies found for the selected criteria and streaming services.")
+            return
+
+        if "TMDB Rating" in sort_by:
+            ranked_movies = sorted(ranked_movies, key=lambda m: _safe_float(m.get("vote_average"), -1), reverse=True)
+
+        shared_services = get_combined_service_names()
+        rows = []
+        for rank, movie in enumerate(ranked_movies, start=1):
+            providers = fetch_movie_watch_providers(movie["id"], region)
+            available_on = [p for p in providers if p in shared_services]
+            service = ", ".join(available_on) if available_on else "N/A"
+
+            rows.append(
+                {
+                    "Rank": rank,
+                    "Title": movie.get("title", "Untitled"),
+                    "Streaming Service": service,
+                    "Popularity": round(_safe_float(movie.get("popularity")), 2),
+                    "TMDB Rating": movie.get("vote_average", "N/A"),
+                    "Year": (movie.get("release_date", "") or "")[:4],
+                }
+            )
+
+    sort_label = "TMDB Rating" if "TMDB Rating" in sort_by else "Popularity"
+    genre_text = f"'{lobby['genre']}'" if lobby.get("genre") else "Any Genre"
+    st.caption(f"Showing the top {min(LIST_BATCH_SIZE, len(ranked_movies))} movies sorted by {sort_label} for {genre_text} and shared streaming services.")
+    st.dataframe(rows, use_container_width=True, hide_index=True)
+
+
+@st.dialog("Reset WatchMatch")
+def show_reset_dialog():
+    st.warning("This clears all active users, votes, and the current match.")
+    confirmation = st.text_input("Type reset to confirm", key="reset_confirmation")
+    if st.button("Reset everything", type="primary"):
+        if confirmation.strip().lower() == "reset":
+            reset_lobby()
+            st.rerun()
+        else:
+            st.error("Type reset exactly to confirm.")
+
+
+with st.sidebar:
+    with st.container():
+        st.markdown('<div style="display: none;">', unsafe_allow_html=True)
+        if st.button("Help", key="hidden_help_btn"):
+            show_help_dialog()
+        if st.button("Movie List", key="hidden_movie_list_btn"):
+            show_movie_list_dialog()
+        if st.button("Reset", key="hidden_reset_btn"):
+            show_reset_dialog()
+        if st.button("Auto Refresh", key="hidden_auto_refresh_btn"):
+            st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
+
+
 
 # Leave Session (only when logged in)
 if st.session_state.get("user_name"):

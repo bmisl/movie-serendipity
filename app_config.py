@@ -5,10 +5,78 @@ from __future__ import annotations
 import os
 from functools import lru_cache
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
 import requests
 import streamlit as st
+
+# ---------------------------------------------------------------------------
+# Region & streaming-service configuration
+# ---------------------------------------------------------------------------
+
+#: Mapping from human-readable country name to TMDB region code.
+REGIONS: Dict[str, str] = {
+    "Finland": "FI",
+    "Denmark": "DK",
+    "Iceland": "IS",
+}
+
+#: Streaming services available per region, keyed by TMDB provider ID.
+REGION_PROVIDERS: Dict[str, Dict[str, int]] = {
+    "FI": {
+        "Netflix": 8,
+        "Amazon Prime Video": 119,
+        "Disney Plus": 337,
+        "HBO Max": 1899,
+        "Viaplay": 76,
+        "Apple TV+": 350,
+        "Ruutu": 338,
+        "Yle Areena": 323,
+        "Viddla": 539,
+    },
+    "DK": {
+        "Netflix": 8,
+        "Amazon Prime Video": 119,
+        "Disney Plus": 337,
+        "HBO Max": 1899,
+        "Viaplay": 76,
+        "Apple TV+": 350,
+        "TV 2 Play": 398,
+        "DRTV": 620,
+    },
+    "IS": {
+        "Netflix": 8,
+        "Amazon Prime Video": 119,
+        "Disney Plus": 337,
+        "HBO Max": 1899,
+        "Viaplay": 76,
+        "Apple TV+": 350,
+        "RÚV": 2674,
+    },
+}
+
+#: Genre names to TMDB genre IDs. ``None`` means "no filter" (all genres).
+GENRES: Dict[str, Optional[int]] = {
+    "All": None,
+    "Action": 28,
+    "Adventure": 12,
+    "Animation": 16,
+    "Comedy": 35,
+    "Crime": 80,
+    "Documentary": 99,
+    "Drama": 18,
+    "Fantasy": 14,
+    "Horror": 27,
+    "Romance": 10749,
+    "Sci-Fi": 878,
+    "Thriller": 53,
+}
+
+# ---------------------------------------------------------------------------
+# Database path
+# ---------------------------------------------------------------------------
+
+DB_PATH = "movies.sqlite"
 
 
 def get_secret(key: str) -> Optional[str]:
