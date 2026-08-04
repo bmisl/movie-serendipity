@@ -1,188 +1,234 @@
-"""Solo movie browser — find something to watch tonight.
+"""Solo movie browser — Live streaming discovery (No local SQLite database needed).
 
 Run with:
     .venv\\Scripts\\streamlit.exe run solo_browser_app.py
 """
 
-import sqlite3
-from typing import List, Optional
+import os
+import time
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
+import requests
 import streamlit as st
 from st_aggrid import AgGrid, GridOptionsBuilder, ColumnsAutoSizeMode
 
-from app_config import DB_PATH, REGION_PROVIDERS, REGIONS
+from app_config import REGION_PROVIDERS, REGIONS, get_secret
 
 # ---------------------------------------------------------------------------
 # Page config
 # ---------------------------------------------------------------------------
 
 st.set_page_config(
-    page_title="Solo Browser",
+    page_title="Solo Movie Browser",
     page_icon="🎬",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
+TMDB_BASE_URL = "https://api.themoviedb.org/3"
+
+def resolve_tmdb_key() -> str:
+    key = get_secret("TMDB_API_KEY")
+    if not key:
+        key = os.getenv("TMDB_API_KEY", "")
+    return key
+
+TMDB_API_KEY = resolve_tmdb_key()
+
+
+def tmdb_api_get(path: str, params: Optional[Dict[str, object]] = None) -> dict:
+    """Fetch JSON from TMDB API with timeout."""
+    if not TMDB_API_KEY:
+        st.error("Missing TMDB_API_KEY. Please configure `.streamlit/secrets.toml` or environment variable.")
+        st.stop()
+
+    payload: Dict[str, object] = {"api_key": TMDB_API_KEY, "language": "en-US"}
+    if params:
+        payload.update(params)
+
+    try:
+        response = requests.get(f"{TMDB_BASE_URL}{path}", params=payload, timeout=10)
+        if response.status_code == 200:
+            return response.json()
+        return {}
+    except Exception:
+        return {}
+
+
 # ---------------------------------------------------------------------------
-# Data loading
+# Live Data Fetching & In-Memory Cache (No SQLite file needed)
 # ---------------------------------------------------------------------------
 
-@st.cache_data(ttl=300)
-def load_movies(region: str, service_ids: tuple) -> pd.DataFrame:
-    """Load movies from SQLite, optionally filtered to services in the given region."""
-    conn = sqlite3.connect(DB_PATH)
-
-    # Build the provider filter clause
-    if service_ids:
-        placeholders = ",".join("?" * len(service_ids))
-        provider_filter = f"""
-            AND m.id IN (
-                SELECT DISTINCT movie_id FROM movie_providers
-                WHERE region = ? AND provider_id IN ({placeholders})
-                AND provider_type IN ('flatrate', 'free', 'ads')
-            )
-        """
-        filter_params: List = [region] + list(service_ids)
-    else:
-        provider_filter = ""
-        filter_params = []
-
-    query = f"""
-        SELECT
-            m.id,
-            m.title,
-            CAST(m.year AS INTEGER)          AS year,
-            ROUND(m.vote_average, 1)         AS rating,
-            m.vote_count                     AS votes,
-            m.runtime,
-            m.overview,
-            m.poster_path,
-            GROUP_CONCAT(DISTINCT mg.genre)  AS genres,
-            GROUP_CONCAT(DISTINCT CASE WHEN mp.role = 'Director' THEN p.name END) AS directors,
-            GROUP_CONCAT(DISTINCT CASE WHEN mp.role = 'Actor'    THEN p.name END) AS actors
-        FROM movies m
-        LEFT JOIN movie_genres mg ON mg.movie_id = m.id
-        LEFT JOIN movie_people mp ON mp.movie_id = m.id
-        LEFT JOIN people p        ON p.id = mp.person_id
-        WHERE m.title IS NOT NULL
-          AND m.year IS NOT NULL
-          {provider_filter}
-        GROUP BY m.id
-        ORDER BY m.popularity DESC
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_live_streaming_movies(region_code: str, service_ids: Tuple[int, ...], fetch_pages: int = 15) -> List[dict]:
+    """Fetch popular movies currently available on streaming services in region_code.
+    
+    Returns a list of movie dicts with full details (credits, genres, overview, providers).
+    Cached in memory for 1 hour.
     """
+    if not service_ids:
+        return []
 
-    df = pd.read_sql_query(query, conn, params=filter_params)
-    conn.close()
+    provider_ids = "|".join(str(pid) for pid in service_ids)
+    discovered_movies: List[dict] = []
+    seen_ids = set()
 
-    # Clean up aggregated strings — sort them alphabetically for readability
-    for col in ("genres", "directors", "actors"):
-        df[col] = df[col].fillna("").apply(
-            lambda v: ", ".join(sorted(x.strip() for x in v.split(",") if x.strip()))
-        )
+    for page in range(1, fetch_pages + 1):
+        params = {
+            "sort_by": "popularity.desc",
+            "include_adult": "false",
+            "page": page,
+            "watch_region": region_code,
+            "with_watch_providers": provider_ids,
+            "with_ott_monetization_types": "flatrate|free|ads",
+            "vote_count.gte": 5,
+        }
+        data = tmdb_api_get("/discover/movie", params)
+        results = data.get("results", [])
+        if not results:
+            break
 
-    return df
+        for m in results:
+            mid = m.get("id")
+            if mid and mid not in seen_ids:
+                seen_ids.add(mid)
+                discovered_movies.append(m)
 
+        time.sleep(0.1)
 
-@st.cache_data(ttl=300)
-def load_services_for_movie(movie_id: int, region: str) -> List[str]:
-    """Return the streaming service names for a movie in the given region."""
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT DISTINCT provider_name FROM movie_providers
-        WHERE movie_id = ? AND region = ?
-          AND provider_type IN ('flatrate', 'free', 'ads')
-        ORDER BY provider_name
-        """,
-        (movie_id, region),
-    )
-    names = [row[0] for row in cur.fetchall()]
-    conn.close()
-    return names
+    # Fetch credits (actors/directors) for discovered movies
+    movie_details: List[dict] = []
+    # Create reverse map of provider_id to provider_name
+    provider_id_to_name = {v: k for k, v in REGION_PROVIDERS.get(region_code, {}).items()}
+
+    for m in discovered_movies:
+        mid = m["id"]
+        # Fetch details + credits
+        detail = tmdb_api_get(f"/movie/{mid}", {"append_to_response": "credits,watch/providers"})
+        if not detail:
+            continue
+
+        release_date = detail.get("release_date") or ""
+        year = int(release_date[:4]) if len(release_date) >= 4 and release_date[:4].isdigit() else None
+
+        genres_list = [g.get("name") for g in detail.get("genres", []) if g.get("name")]
+        genres_str = ", ".join(sorted(genres_list))
+
+        credits = detail.get("credits", {})
+        cast = [c.get("name") for c in credits.get("cast", [])[:10] if c.get("name")]
+        directors = [c.get("name") for c in credits.get("crew", []) if c.get("job") == "Director" and c.get("name")]
+
+        # Determine services for this region
+        p_results = detail.get("watch/providers", {}).get("results", {}).get(region_code, {})
+        movie_services = set()
+        for bucket in ("flatrate", "free", "ads"):
+            for p in p_results.get(bucket, []) or []:
+                pid = p.get("provider_id")
+                name = provider_id_to_name.get(pid) or p.get("provider_name")
+                if name:
+                    movie_services.add(name)
+
+        movie_details.append({
+            "id": mid,
+            "title": detail.get("title") or m.get("title", ""),
+            "year": year,
+            "rating": round(float(detail.get("vote_average", 0.0)), 1),
+            "votes": int(detail.get("vote_count", 0)),
+            "runtime": detail.get("runtime"),
+            "overview": detail.get("overview", ""),
+            "poster_path": detail.get("poster_path", ""),
+            "genres": genres_str,
+            "directors": ", ".join(directors),
+            "actors": ", ".join(cast),
+            "services": ", ".join(sorted(movie_services)),
+        })
+        time.sleep(0.1)
+
+    return movie_details
 
 
 # ---------------------------------------------------------------------------
-# Sidebar — region & service selection
+# Sidebar — controls
 # ---------------------------------------------------------------------------
 
 with st.sidebar:
-    st.title("🎬 Solo Browser")
-    st.markdown("Find a movie to watch tonight.")
+    st.title("🎬 Solo Movie Browser")
+    st.markdown("Live streaming movie discovery (No database needed).")
     st.divider()
 
-    region_name = st.selectbox("Region", list(REGIONS.keys()), index=0)
+    region_name = st.selectbox("Country / Region", list(REGIONS.keys()), index=0)
     region_code = REGIONS[region_name]
 
-    region_services = REGION_PROVIDERS.get(region_code, {})
-    all_service_names = list(region_services.keys())
+    region_services_map = REGION_PROVIDERS.get(region_code, {})
+    all_service_names = list(region_services_map.keys())
 
-    st.markdown("**Streaming services**")
-    show_all = st.toggle("Show all movies (ignore services)", value=False)
-
-    if show_all:
-        selected_services: List[str] = []
-    else:
-        selected_services = st.multiselect(
-            "Filter by service",
-            options=all_service_names,
-            default=all_service_names,
-            label_visibility="collapsed",
-        )
-
-    st.divider()
-    st.caption(
-        "Provider data is fetched from TMDB and cached locally. "
-        "Re-run `backfill_providers.py` to refresh."
+    selected_service_names = st.multiselect(
+        "Streaming Services",
+        options=all_service_names,
+        default=all_service_names,
+        help="Select which streaming services to search.",
     )
 
+    fetch_limit = st.slider(
+        "Catalogue size (movies to pull)",
+        min_value=100,
+        max_value=1000,
+        value=300,
+        step=100,
+        help="Higher values pull more movies live from TMDB.",
+    )
+
+    if st.button("🔄 Refresh Live Data"):
+        st.cache_data.clear()
+        st.rerun()
+
+    st.divider()
+    st.caption("Live streaming data from TMDB (in-memory cached, no local DB).")
+
 # ---------------------------------------------------------------------------
-# Load data
+# Load Live Data into Pandas DataFrame
 # ---------------------------------------------------------------------------
 
-selected_ids = tuple(
-    region_services[s] for s in selected_services if s in region_services
+selected_service_ids = tuple(
+    region_services_map[s] for s in selected_service_names if s in region_services_map
 )
+pages_to_fetch = max(1, fetch_limit // 20)
 
-with st.spinner("Loading movies…"):
-    df = load_movies(region_code, selected_ids)
+if not selected_service_ids:
+    st.warning("Please select at least one streaming service in the sidebar.")
+    st.stop()
+
+with st.spinner(f"Pulling current streaming movies for {region_name} from TMDB…"):
+    movies_list = fetch_live_streaming_movies(region_code, selected_service_ids, pages_to_fetch)
+
+df = pd.DataFrame(movies_list)
+
+if df.empty:
+    st.info("No movies found for the selected services.")
+    st.stop()
+
+# Filter by selected services if needed
+if selected_service_names and set(selected_service_names) != set(all_service_names):
+    pattern = "|".join(selected_service_names)
+    df = df[df["services"].str.contains(pattern, case=False, na=False)]
 
 # ---------------------------------------------------------------------------
 # Header
 # ---------------------------------------------------------------------------
 
-st.title("Movie Browser")
-if show_all:
-    st.caption(f"Showing all {len(df):,} movies in the database.")
-elif selected_services:
-    service_label = ", ".join(selected_services)
-    st.caption(
-        f"Showing {len(df):,} movies available in **{region_name}** on: {service_label}"
-    )
-else:
-    st.caption("No services selected — select at least one service in the sidebar, or toggle 'Show all movies'.")
+st.title("Movie Catalogue")
+st.caption(
+    f"Loaded **{len(df):,} movies** currently streaming in **{region_name}** on {', '.join(selected_service_names)}"
+)
 
 # ---------------------------------------------------------------------------
-# AG Grid table
+# AG Grid Table
 # ---------------------------------------------------------------------------
 
-DISPLAY_COLS = ["title", "year", "rating", "votes", "genres", "directors", "actors"]
-COL_LABELS = {
-    "title": "Title",
-    "year": "Year",
-    "rating": "Rating",
-    "votes": "Votes",
-    "genres": "Genre",
-    "directors": "Directors",
-    "actors": "Actors",
-}
+DISPLAY_COLS = ["title", "year", "rating", "votes", "genres", "directors", "actors", "services"]
 
-grid_df = df[DISPLAY_COLS + ["id", "overview", "poster_path", "runtime"]].copy()
-
-gb = GridOptionsBuilder.from_dataframe(grid_df[DISPLAY_COLS])
-
-# Column definitions
+gb = GridOptionsBuilder.from_dataframe(df[DISPLAY_COLS])
 gb.configure_column("title",     header_name="Title",     filter="agTextColumnFilter",   flex=3, minWidth=160)
 gb.configure_column("year",      header_name="Year",      filter="agNumberColumnFilter", flex=1, minWidth=80,  type=["numericColumn"])
 gb.configure_column("rating",    header_name="Rating",    filter="agNumberColumnFilter", flex=1, minWidth=90,  type=["numericColumn"])
@@ -190,6 +236,7 @@ gb.configure_column("votes",     header_name="Votes",     filter="agNumberColumn
 gb.configure_column("genres",    header_name="Genre",     filter="agTextColumnFilter",   flex=2, minWidth=140)
 gb.configure_column("directors", header_name="Directors", filter="agTextColumnFilter",   flex=2, minWidth=140)
 gb.configure_column("actors",    header_name="Actors",    filter="agTextColumnFilter",   flex=3, minWidth=180)
+gb.configure_column("services",  header_name="Services",  filter="agTextColumnFilter",   flex=2, minWidth=140)
 
 gb.configure_selection(selection_mode="single", use_checkbox=False)
 gb.configure_default_column(resizable=True, sortable=True, floatingFilter=True)
@@ -197,12 +244,11 @@ gb.configure_grid_options(rowHeight=32, suppressMovableColumns=False)
 
 grid_options = gb.build()
 
-# Initialise selection tracker — only show dialog when the user clicks a NEW row
 if "_selected_movie_id" not in st.session_state:
     st.session_state["_selected_movie_id"] = None
 
 grid_response = AgGrid(
-    grid_df[DISPLAY_COLS],
+    df[DISPLAY_COLS],
     gridOptions=grid_options,
     update_on=["selectionChanged"],
     columns_auto_size_mode=ColumnsAutoSizeMode.FIT_CONTENTS,
@@ -216,8 +262,6 @@ grid_response = AgGrid(
 # ---------------------------------------------------------------------------
 
 selected_rows = grid_response.get("selected_rows")
-
-# Normalise selected_rows to a plain dict (or None)
 selected_row = None
 if selected_rows is not None:
     if hasattr(selected_rows, "empty"):
@@ -226,15 +270,11 @@ if selected_rows is not None:
     elif selected_rows:
         selected_row = selected_rows[0]
 
-# Only open the dialog when the user genuinely clicks a new row.
-# Typing in the filter re-renders the grid and re-sends the old selection —
-# we detect this by comparing the movie title against what we already showed.
 if selected_row is not None:
     clicked_title = selected_row.get("title", "")
     if clicked_title != st.session_state["_selected_movie_id"]:
         st.session_state["_selected_movie_id"] = clicked_title
 
-        # Look up the full record (includes poster_path, overview, etc.)
         matches = df[df["title"] == clicked_title]
         full = matches.iloc[0] if not matches.empty else pd.Series(selected_row)
 
@@ -252,7 +292,7 @@ if selected_row is not None:
                 runtime = full.get("runtime", "")
                 rating = full.get("rating", "")
                 runtime_str = f" · {runtime} min" if runtime else ""
-                st.markdown(f"**{year}{runtime_str}** · \u2b50 {rating}")
+                st.markdown(f"**{year}{runtime_str}** · ⭐ {rating}")
 
                 genres = full.get("genres", "")
                 if genres:
@@ -274,13 +314,10 @@ if selected_row is not None:
 
                 st.divider()
 
-                movie_id = full.get("id")
-                if movie_id:
-                    services = load_services_for_movie(int(movie_id), region_code)
-                    if services:
-                        st.markdown(f"**Available on ({region_name}):** {', '.join(services)}")
-                    else:
-                        st.markdown(f"**Available on ({region_name}):** Not found on any tracked service")
+                services = full.get("services", "")
+                if services:
+                    st.markdown(f"📺 **Available on ({region_name}):** {services}")
+                else:
+                    st.markdown(f"📺 **Available on ({region_name}):** Not found on selected services")
 
         show_detail()
-
