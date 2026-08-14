@@ -3,3 +3,5 @@ requests
 streamlit-aggrid
 pandas
 tqdm
+beautifulsoup4
+lxml
