@@ -2,6 +2,7 @@ import random
 import re
 import sqlite3
 import time
+import concurrent.futures
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -19,7 +20,10 @@ TMDB_API_KEY = get_secret("TMDB_API_KEY") or ""
 TMDB_BASE_URL = "https://api.themoviedb.org/3"
 TMDB_IMAGE_BASE = "https://image.tmdb.org/t/p/w500"
 
-RANK_BATCH_SIZE = 24
+# OMDB API Setup
+OMDB_API_KEY = get_secret("OMDB_API_KEY") or ""
+
+RANK_BATCH_SIZE = 96
 LIST_BATCH_SIZE = 50
 MATCH_POOL_SIZE = 120
 MAX_MOVIE_PICKS = 5
@@ -28,6 +32,77 @@ MAX_MOVIE_PICKS = 5
 # ==============================================================================
 # LOCAL SQLITE DATABASE LAYER (movies.sqlite)
 # ==============================================================================
+
+def enrich_with_imdb(movies: List[dict]) -> List[dict]:
+    if not OMDB_API_KEY or not movies:
+        return movies
+    
+    conn = get_db_connection()
+    movie_ids = [m["id"] for m in movies]
+    placeholders = ",".join("?" for _ in movie_ids)
+    cur = conn.cursor()
+    cur.execute(f"SELECT movie_id, imdb_id, imdb_rating, imdb_votes FROM movies WHERE movie_id IN ({placeholders})", tuple(movie_ids))
+    db_info = {row["movie_id"]: dict(row) for row in cur.fetchall()}
+    conn.close()
+    
+    def fetch_omdb(m):
+        mid = m["id"]
+        info = db_info.get(mid, {})
+        if info.get("imdb_rating") is not None:
+            m["imdb_rating"] = info["imdb_rating"]
+            m["imdb_votes"] = info.get("imdb_votes")
+            m["imdb_id"] = info.get("imdb_id")
+            return None
+        
+        try:
+            # Step 1: get imdb_id from TMDB external_ids (exact match, no year guessing)
+            imdb_id = info.get("imdb_id")
+            if not imdb_id:
+                ext_res = requests.get(
+                    f"{TMDB_BASE_URL}/movie/{mid}/external_ids",
+                    params={"api_key": TMDB_API_KEY},
+                    timeout=5,
+                )
+                if ext_res.status_code == 200:
+                    imdb_id = ext_res.json().get("imdb_id") or None
+
+            # Step 2: query OMDB — by ID if we have it, otherwise by title only (no year)
+            if imdb_id:
+                omdb_url = f"http://www.omdbapi.com/?apikey={OMDB_API_KEY}&i={imdb_id}"
+            else:
+                title = m.get("title", "")
+                omdb_url = f"http://www.omdbapi.com/?apikey={OMDB_API_KEY}&t={requests.utils.quote(title)}"
+
+            res = requests.get(omdb_url, timeout=5)
+            if res.status_code == 200:
+                data = res.json()
+                if data.get("Response") == "True":
+                    rating_val = data.get("imdbRating", "N/A")
+                    m["imdb_rating"] = _safe_float(rating_val, None) if rating_val != "N/A" else None
+
+                    votes_str = data.get("imdbVotes", "N/A")
+                    m["imdb_votes"] = int(votes_str.replace(",", "")) if votes_str and votes_str != "N/A" else None
+
+                    m["imdb_id"] = data.get("imdbID") or imdb_id
+                    return (m["imdb_id"], m["imdb_rating"], m["imdb_votes"], mid)
+        except Exception:
+            pass
+        return None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        results = list(executor.map(fetch_omdb, movies))
+        
+    updates = [r for r in results if r is not None]
+    
+    if updates:
+        conn = get_db_connection()
+        conn.executemany("""
+            UPDATE movies SET imdb_id=?, imdb_rating=?, imdb_votes=? WHERE movie_id=?
+        """, updates)
+        conn.commit()
+        conn.close()
+        
+    return movies
 
 def get_db_path() -> Path:
     return Path(DB_PATH)
@@ -50,8 +125,8 @@ def init_db_schema() -> None:
         title TEXT NOT NULL,
         year INTEGER,
         release_date TEXT,
-        rating REAL,
-        votes INTEGER,
+        tmdb_rating REAL,
+        tmdb_votes INTEGER,
         genres TEXT,
         overview TEXT,
         poster_path TEXT,
@@ -96,10 +171,10 @@ def normalize_movie_record(movie: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(movie)
     if "id" not in normalized and normalized.get("movie_id") is not None:
         normalized["id"] = normalized["movie_id"]
-    if "vote_average" not in normalized and "rating" in normalized:
-        normalized["vote_average"] = normalized["rating"]
-    if "vote_count" not in normalized and "votes" in normalized:
-        normalized["vote_count"] = normalized["votes"]
+    if "vote_average" not in normalized and "tmdb_rating" in normalized:
+        normalized["vote_average"] = normalized["tmdb_rating"]
+    if "vote_count" not in normalized and "tmdb_votes" in normalized:
+        normalized["vote_count"] = normalized["tmdb_votes"]
     return normalized
 
 
@@ -122,14 +197,14 @@ def upsert_movie_to_db(movie: dict[str, Any]) -> None:
         genres_str = str(genres_val or "")
 
     cur.execute("""
-    INSERT INTO movies (movie_id, title, year, release_date, rating, votes, genres, overview, poster_path, popularity, last_updated)
+    INSERT INTO movies (movie_id, title, year, release_date, tmdb_rating, tmdb_votes, genres, overview, poster_path, popularity, last_updated)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(movie_id) DO UPDATE SET
         title = excluded.title,
         year = COALESCE(excluded.year, movies.year),
         release_date = COALESCE(excluded.release_date, movies.release_date),
-        rating = COALESCE(excluded.rating, movies.rating),
-        votes = COALESCE(excluded.votes, movies.votes),
+        tmdb_rating = COALESCE(excluded.tmdb_rating, movies.tmdb_rating),
+        tmdb_votes = COALESCE(excluded.tmdb_votes, movies.tmdb_votes),
         genres = COALESCE(excluded.genres, movies.genres),
         overview = COALESCE(excluded.overview, movies.overview),
         poster_path = COALESCE(excluded.poster_path, movies.poster_path),
@@ -405,7 +480,7 @@ def generate_personalized_movie_pool(genre_name: Optional[str], limit: int = MAT
             pool_dict[mid] = movie_copy
 
     sorted_pool = sorted(pool_dict.values(), key=lambda m: m.get("match_score", 0.0), reverse=True)
-    return sorted_pool[:limit]
+    return enrich_with_imdb(sorted_pool[:limit])
 
 
 
@@ -751,7 +826,7 @@ def show_help_dialog():
     - **Step 3:** Choose a group activity in Watch Party Setup, or select **Browse the local movie library** when you want to explore on your own.
 
     ### 🎬 Modes
-    - **Group Match:** Personalized candidate pool combining Letterboxd watchlists, high ratings, and group streaming availability. Pick up to 5 movies with unique ranks 1–5, then vote Yes in Round 2!
+    - **Group Match:** Personalized candidate pool combining Letterboxd watchlists, high ratings, and group streaming availability. Pick up to 5 movies, then vote for your top 3 choices in Phase 2!
     - **Local movie library:** Browse movies saved in `movies.sqlite`, select your availability region and streaming services, and see each saved movie's streaming services. It does not change an active watch party.
 
     ---
@@ -761,23 +836,18 @@ def show_help_dialog():
     - **Spacebar**: Manual status refresh.
     """
     )
-    st.info(
-        "Group Match now uses five movie-pick stars instead of numeric ranks. "
-        "Select a movie's empty star to use one; deselect its filled star to return it.",
-        icon=":material/star:",
-    )
 
 
-@st.dialog("Ranked Movie List", width="large")
+@st.dialog("Movie List", width="large")
 def show_movie_list_dialog():
     region = lobby.get("region", "FI")
     provider_ids = get_combined_provider_ids()
-    sort_by = st.radio("Sort by", ["📈 Popularity", "⭐ TMDB Rating"], horizontal=True)
 
-    with st.spinner("Fetching ranked movies and checking streaming services..."):
+    with st.spinner("Fetching movies and checking streaming services..."):
         try:
             genre_id = GENRES[lobby["genre"]] if lobby.get("genre") else None
             ranked_movies = fetch_ranked_movies(genre_id, provider_ids, LIST_BATCH_SIZE, region)
+            ranked_movies = enrich_with_imdb(ranked_movies)
         except Exception:
             ranked_movies = []
 
@@ -785,30 +855,26 @@ def show_movie_list_dialog():
             st.info("No movies found for the selected criteria and streaming services.")
             return
 
-        if "TMDB Rating" in sort_by:
-            ranked_movies = sorted(ranked_movies, key=lambda m: _safe_float(m.get("vote_average"), -1), reverse=True)
-
         shared_services = get_combined_service_names()
         rows = []
-        for rank, movie in enumerate(ranked_movies, start=1):
+        for movie in ranked_movies:
             providers = fetch_movie_watch_providers(movie["id"], region)
             available_on = [p for p in providers if p in shared_services]
             service = ", ".join(available_on) if available_on else "N/A"
 
             rows.append(
                 {
-                    "Rank": rank,
                     "Title": movie.get("title", "Untitled"),
                     "Streaming Service": service,
                     "Popularity": round(_safe_float(movie.get("popularity")), 2),
                     "TMDB Rating": movie.get("vote_average", "N/A"),
+                    "IMDb Rating": movie.get("imdb_rating", "N/A"),
                     "Year": (movie.get("release_date", "") or "")[:4],
                 }
             )
 
-    sort_label = "TMDB Rating" if "TMDB Rating" in sort_by else "Popularity"
     genre_text = f"'{lobby['genre']}'" if lobby.get("genre") else "Any Genre"
-    st.caption(f"Showing top movies sorted by {sort_label} for {genre_text} on shared streaming services.")
+    st.caption(f"Showing top movies sorted by Popularity for {genre_text} on shared streaming services.")
     st.dataframe(rows, width="stretch", hide_index=True)
 
 
@@ -864,7 +930,7 @@ with refresh_col:
     if st.button("🔄 Refresh", key="top_refresh_button"):
         st.rerun()
 with menu_col:
-    if st.button("📊 Ranked List", key="top_ranked_list_btn"):
+    if st.button("📊 Movie List", key="top_ranked_list_btn"):
         show_movie_list_dialog()
 
 if "user_name" not in st.session_state:
@@ -921,7 +987,7 @@ if st.session_state.app_view == "solo":
         LEFT JOIN availability
             ON availability.movie_id = movies.movie_id
             AND availability.region_code = ?
-        WHERE movies.rating >= ?
+        WHERE movies.tmdb_rating >= ?
     """
     params: list[Any] = [browse_region, min_rating]
 
@@ -964,7 +1030,7 @@ if st.session_state.app_view == "solo":
                                 st.caption(f"Watch on: {services}")
                             else:
                                 st.caption(f"Availability not saved for {browse_region_name}")
-                            st.caption(f"📅 {movie.get('year') or 'N/A'} · ⭐ {movie.get('rating', 'N/A')}")
+                            st.caption(f"📅 {movie.get('year') or 'N/A'} · TMDB ⭐ {movie.get('tmdb_rating', 'N/A')} · IMDb ⭐ {movie.get('imdb_rating', 'N/A')}")
                             with st.expander("ℹ️ Details"):
                                 st.write(movie.get("overview", "No overview."))
 
@@ -1059,7 +1125,28 @@ else:
         if available_on:
             st.markdown(f"📺 **Watch on:** {', '.join(available_on)}")
 
+        st.divider()
+        st.markdown("### 🏆 Final Ranked Results")
+        if lobby.get("final_results"):
+            # Sort final results by stars (descending) and then popularity (descending)
+            ranked = sorted(
+                lobby["final_results"], 
+                key=lambda x: (x["final_stars"], x["popularity"]), 
+                reverse=True
+            )
+            rows = []
+            for item in ranked:
+                m = item["movie"]
+                rows.append({
+                    "Stars": item["final_stars"],
+                    "Title": m.get("title", "Untitled"),
+                    "TMDB Popularity": round(item["popularity"], 2),
+                    "TMDB Rating": m.get("vote_average", "N/A"),
+                    "IMDb Rating": m.get("imdb_rating", "N/A"),
+                })
+            st.dataframe(rows, hide_index=True, width="stretch")
 
+        st.divider()
         if st.button("Start Over / New Search"):
             reset_lobby()
             st.rerun()
@@ -1179,7 +1266,9 @@ else:
                     with cols[j]:
                         with st.container(border=True):
                             rank_number = i + j + 1
-                            st.caption(f"#{rank_number} · rating {_safe_float(movie.get('vote_average')):.1f}")
+                            imdb_val = movie.get('imdb_rating')
+                            imdb_str = f"{float(imdb_val):.1f}" if imdb_val else "N/A"
+                            st.caption(f"#{rank_number} · TMDB ⭐ {_safe_float(movie.get('vote_average')):.1f} · IMDb ⭐ {imdb_str}")
                             w_users = movie.get("watchlist_users", [])
                             if w_users:
                                 st.markdown(f'<span class="badge-pill">🔖 Watchlist ({len(w_users)})</span>', unsafe_allow_html=True)
@@ -1280,7 +1369,9 @@ else:
                             else:
                                 st.write("No poster")
                             st.markdown(f"**{movie.get('title', 'Untitled')}**")
-                            st.caption(f"Picked by {movie['interest_count']} participant(s)")
+                            imdb_val = movie.get('imdb_rating')
+                            imdb_str = f"{float(imdb_val):.1f}" if imdb_val else "N/A"
+                            st.caption(f"Picked by {movie['interest_count']} participant(s) · TMDB ⭐ {_safe_float(movie.get('vote_average')):.1f} · IMDb ⭐ {imdb_str}")
                             with st.container(horizontal=True):
                                 for score in required_scores:
                                     is_selected = user_data["round2_votes"].get(movie["id"]) == score
@@ -1341,7 +1432,7 @@ else:
                             if movie.get("poster_path"):
                                 st.image(f"{TMDB_IMAGE_BASE}{movie['poster_path']}", width="stretch")
                             st.markdown(f"**{movie.get('title', 'Untitled')}**")
-                            st.caption(f"📅 {str(movie.get('release_date', ''))[:4]} · ⭐ {movie.get('vote_average', 'N/A')}")
+                            st.caption(f"📅 {str(movie.get('release_date', ''))[:4]} · TMDB ⭐ {movie.get('vote_average', 'N/A')} · IMDb ⭐ {movie.get('imdb_rating', 'N/A')}")
                             with st.expander("ℹ️ Details"):
                                 st.write(movie.get("overview", "No overview."))
 

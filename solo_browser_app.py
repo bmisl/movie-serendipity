@@ -81,8 +81,8 @@ def init_global_db():
         title TEXT NOT NULL,
         year INTEGER,
         release_date TEXT,
-        rating REAL,
-        votes INTEGER,
+        tmdb_rating REAL,
+        tmdb_votes INTEGER,
         genres TEXT,
         overview TEXT,
         poster_path TEXT,
@@ -90,7 +90,10 @@ def init_global_db():
         runtime INTEGER,
         directors TEXT,
         actors TEXT,
-        last_updated TEXT
+        last_updated TEXT,
+        imdb_id TEXT,
+        imdb_rating REAL,
+        imdb_votes INTEGER
     )
     """)
     # Per-region availability - tiny rows
@@ -149,14 +152,14 @@ def upsert_movies_global(movies: List[dict]):
     now = datetime.now(timezone.utc).isoformat()
     for m in movies:
         cur.execute("""
-            INSERT INTO movies(movie_id, title, year, release_date, rating, votes, genres, overview, poster_path, popularity, runtime, directors, actors, last_updated)
-            VALUES(:movie_id, :title, :year, :release_date, :rating, :votes, :genres, :overview, :poster_path, :popularity, :runtime, :directors, :actors, :last_updated)
+            INSERT INTO movies(movie_id, title, year, release_date, tmdb_rating, tmdb_votes, genres, overview, poster_path, popularity, runtime, directors, actors, last_updated)
+            VALUES(:movie_id, :title, :year, :release_date, :tmdb_rating, :tmdb_votes, :genres, :overview, :poster_path, :popularity, :runtime, :directors, :actors, :last_updated)
             ON CONFLICT(movie_id) DO UPDATE SET
                 title=COALESCE(NULLIF(excluded.title,''), title),
                 year=COALESCE(excluded.year, year),
                 release_date=COALESCE(NULLIF(excluded.release_date,''), release_date),
-                rating=COALESCE(excluded.rating, rating),
-                votes=COALESCE(excluded.votes, votes),
+                tmdb_rating=COALESCE(excluded.tmdb_rating, tmdb_rating),
+                tmdb_votes=COALESCE(excluded.tmdb_votes, tmdb_votes),
                 genres=COALESCE(NULLIF(excluded.genres,''), genres),
                 overview=COALESCE(NULLIF(excluded.overview,''), overview),
                 poster_path=COALESCE(NULLIF(excluded.poster_path,''), poster_path),
@@ -170,8 +173,8 @@ def upsert_movies_global(movies: List[dict]):
             "title": m.get("title",""),
             "year": m.get("year"),
             "release_date": m.get("release_date",""),
-            "rating": m.get("rating"),
-            "votes": m.get("votes"),
+            "tmdb_rating": m.get("tmdb_rating", m.get("rating")),
+            "tmdb_votes": m.get("tmdb_votes", m.get("votes")),
             "genres": m.get("genres",""),
             "overview": m.get("overview",""),
             "poster_path": m.get("poster_path",""),
@@ -238,9 +241,9 @@ def fetch_from_global_db(
         params = []
         if streaming_only:
             query = """
-            SELECT m.movie_id, m.title, m.year, m.release_date, m.rating, m.votes,
+            SELECT m.movie_id, m.title, m.year, m.release_date, m.tmdb_rating, m.tmdb_votes,
                    m.genres, m.overview, m.poster_path, m.popularity, m.runtime,
-                   m.directors, m.actors, COALESCE(a.services, '') as services
+                   m.directors, m.actors, m.imdb_rating, COALESCE(a.services, '') as services
             FROM movies m
             JOIN availability a ON m.movie_id = a.movie_id AND a.region_code = ?
             WHERE (a.services IS NOT NULL AND a.services != '')
@@ -248,9 +251,9 @@ def fetch_from_global_db(
             params.append(region_code)
         else:
             query = """
-            SELECT m.movie_id, m.title, m.year, m.release_date, m.rating, m.votes,
+            SELECT m.movie_id, m.title, m.year, m.release_date, m.tmdb_rating, m.tmdb_votes,
                    m.genres, m.overview, m.poster_path, m.popularity, m.runtime,
-                   m.directors, m.actors, COALESCE(a.services, '') as services
+                   m.directors, m.actors, m.imdb_rating, COALESCE(a.services, '') as services
             FROM movies m
             LEFT JOIN availability a ON m.movie_id = a.movie_id AND a.region_code = ?
             WHERE 1=1
@@ -396,8 +399,8 @@ def fetch_discover_movies_for_sort(region_code: str, provider_ids: Tuple[int, ..
                 "movie_id": movie_id,
                 "title": movie.get("title") or movie.get("original_title") or "",
                 "year": year,
-                "rating": round(float(movie.get("vote_average") or 0.0), 1),
-                "votes": int(movie.get("vote_count") or 0),
+                "tmdb_rating": round(float(movie.get("vote_average") or 0.0), 1),
+                "tmdb_votes": int(movie.get("vote_count") or 0),
                 "genres": ", ".join(genre_names),
                 "overview": movie.get("overview") or "",
                 "poster_path": movie.get("poster_path") or "",
@@ -439,8 +442,8 @@ def fetch_tmdb_search_movies(region_code: str, provider_ids: Tuple[int, ...], ge
                 "movie_id": movie_id,
                 "title": movie.get("title") or movie.get("original_title") or "",
                 "year": year,
-                "rating": round(float(movie.get("vote_average") or 0.0), 1),
-                "votes": int(movie.get("vote_count") or 0),
+                "tmdb_rating": round(float(movie.get("vote_average") or 0.0), 1),
+                "tmdb_votes": int(movie.get("vote_count") or 0),
                 "genres": ", ".join(genre_names),
                 "overview": movie.get("overview") or "",
                 "poster_path": movie.get("poster_path") or "",
@@ -888,14 +891,14 @@ def main():
                 upsert_availability_batch([(r["movie_id"], region_code, "") for r in movie_rows])
 
     movie_frame = pd.DataFrame(movie_rows)
-    required_columns = {"movie_id","title","year","rating","votes","genres","overview"}
+    required_columns = {"movie_id","title","year","tmdb_rating","tmdb_votes","genres","overview"}
     if movie_frame.empty or not required_columns.issubset(movie_frame.columns):
         st.info("No movies match the current search or filters.")
         st.stop()
 
     movie_frame["year"] = pd.to_numeric(movie_frame["year"], errors="coerce")
-    movie_frame["rating"] = pd.to_numeric(movie_frame["rating"], errors="coerce")
-    movie_frame["votes"] = pd.to_numeric(movie_frame["votes"], errors="coerce")
+    movie_frame["tmdb_rating"] = pd.to_numeric(movie_frame["tmdb_rating"], errors="coerce")
+    movie_frame["tmdb_votes"] = pd.to_numeric(movie_frame["tmdb_votes"], errors="coerce")
 
     movie_rows = movie_frame.to_dict(orient="records")
     schedule_detail_jobs(movie_rows, region_code)
@@ -913,15 +916,20 @@ def main():
         st.caption(f"Loaded {len(movie_frame):,} movies. Detailed cast/director data will appear when enrichment finishes and will be cached globally.")
         detail_status_fragment(movie_rows, region_code)
 
-    visible_columns = ["movie_id","title","year","rating","votes","genres","directors","actors","services"]
+    visible_columns = ["movie_id","title","year","tmdb_rating","imdb_rating","tmdb_votes","genres","directors","actors","services"]
+    # imdb_rating may not exist in every row (older records); fill missing with None
+    for col in ("imdb_rating",):
+        if col not in movie_frame.columns:
+            movie_frame[col] = None
     grid_frame = movie_frame[visible_columns].copy()
 
     grid_builder = GridOptionsBuilder.from_dataframe(grid_frame)
     grid_builder.configure_column("movie_id", hide=True)
     grid_builder.configure_column("title", header_name="Title", filter="agTextColumnFilter", flex=3, minWidth=220)
     grid_builder.configure_column("year", header_name="Year", filter="agNumberColumnFilter", type=["numericColumn"], flex=1, minWidth=90)
-    grid_builder.configure_column("rating", header_name="Rating", filter="agNumberColumnFilter", type=["numericColumn"], flex=1, minWidth=90)
-    grid_builder.configure_column("votes", header_name="Votes", filter="agNumberColumnFilter", type=["numericColumn"], flex=1, minWidth=100)
+    grid_builder.configure_column("tmdb_rating", header_name="TMDB Rating", filter="agNumberColumnFilter", type=["numericColumn"], flex=1, minWidth=110)
+    grid_builder.configure_column("imdb_rating", header_name="IMDb Rating", filter="agNumberColumnFilter", type=["numericColumn"], flex=1, minWidth=110)
+    grid_builder.configure_column("tmdb_votes", header_name="TMDB Votes", filter="agNumberColumnFilter", type=["numericColumn"], flex=1, minWidth=110)
     grid_builder.configure_column("genres", header_name="Genres", filter="agTextColumnFilter", flex=2, minWidth=180)
     grid_builder.configure_column("directors", header_name="Directors", filter="agTextColumnFilter", flex=2, minWidth=180)
     grid_builder.configure_column("actors", header_name="Actors", filter="agTextColumnFilter", flex=3, minWidth=220)
@@ -980,10 +988,12 @@ def main():
                 runtime = humanize_runtime(row_data.get("runtime"))
                 if runtime:
                     header_bits.append(runtime)
-                if row_data.get("rating") is not None:
-                    header_bits.append(f"Rating {float(row_data['rating']):.1f}")
-                if row_data.get("votes") is not None:
-                    header_bits.append(f"{int(row_data['votes']):,} votes")
+                if row_data.get("tmdb_rating") is not None:
+                    header_bits.append(f"TMDB ⭐ {float(row_data['tmdb_rating']):.1f}")
+                if row_data.get("imdb_rating") is not None:
+                    header_bits.append(f"IMDb ⭐ {float(row_data['imdb_rating']):.1f}")
+                if row_data.get("tmdb_votes") is not None:
+                    header_bits.append(f"{int(row_data['tmdb_votes']):,} TMDB votes")
                 if header_bits:
                     st.caption(" | ".join(header_bits))
                 genres = row_data.get("genres")
