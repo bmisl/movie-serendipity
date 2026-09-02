@@ -1,15 +1,27 @@
 import random
 import re
 import sqlite3
+import sys
 import time
 import concurrent.futures
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+if sys.platform == "win32":
+    import asyncio.proactor_events
+    _orig_call_connection_lost = asyncio.proactor_events._ProactorBasePipeTransport._call_connection_lost
+
+    def _silenced_call_connection_lost(self, exc):
+        try:
+            _orig_call_connection_lost(self, exc)
+        except (ConnectionResetError, OSError):
+            pass
+
+    asyncio.proactor_events._ProactorBasePipeTransport._call_connection_lost = _silenced_call_connection_lost
+
 import requests
 import streamlit as st
-import streamlit.components.v1 as components
 
 from app_config import DB_PATH, GENRES, REGION_PROVIDERS, REGIONS, get_secret
 from letterboxd_profile import clean_title, parse_rating
@@ -34,14 +46,22 @@ MAX_MOVIE_PICKS = 5
 # ==============================================================================
 
 def enrich_with_imdb(movies: List[dict]) -> List[dict]:
-    if not OMDB_API_KEY or not movies:
+    if not movies:
         return movies
     
     conn = get_db_connection()
     movie_ids = [m["id"] for m in movies]
     placeholders = ",".join("?" for _ in movie_ids)
     cur = conn.cursor()
-    cur.execute(f"SELECT movie_id, imdb_id, imdb_rating, imdb_votes FROM movies WHERE movie_id IN ({placeholders})", tuple(movie_ids))
+    cur.execute(
+        f"""
+        SELECT m.movie_id, m.imdb_id, r.rating AS imdb_rating, r.votes AS imdb_votes
+        FROM movies m
+        LEFT JOIN ratings r ON m.movie_id = r.movie_id AND r.source = 'imdb'
+        WHERE m.movie_id IN ({placeholders})
+        """,
+        tuple(movie_ids),
+    )
     db_info = {row["movie_id"]: dict(row) for row in cur.fetchall()}
     conn.close()
     
@@ -587,11 +607,11 @@ def load_next_browse_page() -> None:
 
 
 def auto_refresh_page(interval_ms: int = 5000) -> None:
-    components.html(
+    st.html(
         f"""
         <script>
         setTimeout(function() {{
-            const doc = window.parent.document;
+            const doc = (window.parent && window.parent.document) ? window.parent.document : document;
             const buttons = Array.from(doc.querySelectorAll('button'));
             const refreshBtn = buttons.find(b => b.innerText.trim() === 'Auto Refresh' || b.innerText.includes('Auto Refresh'));
             if (refreshBtn) {{
@@ -600,8 +620,7 @@ def auto_refresh_page(interval_ms: int = 5000) -> None:
         }}, {interval_ms});
         </script>
         """,
-        height=0,
-        width=0,
+        unsafe_allow_javascript=True,
     )
 
 
@@ -628,7 +647,7 @@ def toggle_movie_pick(movie_id: int, user_name: str) -> None:
     picks_used = sum(1 for value in votes.values() if value > 0)
     if picks_used >= MAX_MOVIE_PICKS:
         st.session_state["movie_pick_limit_message"] = (
-            "All five stars are in use. Deselect a movie before choosing another."
+            "Five movies have been selected. Deselect one in order to pick a new one."
         )
         return
 
@@ -720,9 +739,225 @@ def fetch_movie_watch_providers(movie_id: int, region: str = "FI") -> List[str]:
 
 
 st.set_page_config(page_title="WatchMatch", layout="wide", initial_sidebar_state="expanded")
+# Add page selector for multi-page UI
+st.sidebar.title("🔎 Choose Page")
+page_mode = st.sidebar.radio("Select Page", ["WatchMatch", "Discover"], index=0)
+# Dummy edit – file last updated on 2026-09-02T01:45:00+03:00
+if page_mode == "Discover":
+    import pandas as pd
+    from st_aggrid import AgGrid, ColumnsAutoSizeMode, DataReturnMode, GridOptionsBuilder, GridUpdateMode
+    import movie_discovery as md
+
+    st.title("🔍 Discover Movies")
+    st.caption("Search across titles, actors, directors, genres, and movie overviews — only titles available on streaming services are shown.")
+
+    # --- Sidebar filters for Discover ---
+    with st.sidebar:
+        st.subheader("Discover Filters")
+        region_names_d = list(REGIONS.keys())
+        disc_region_name = st.selectbox("Region", region_names_d, key="discover_region")
+        disc_region = REGIONS[disc_region_name]
+        available_services = list(REGION_PROVIDERS.get(disc_region, {}).keys())
+        disc_services = st.multiselect(
+            f"Streaming Services ({disc_region})",
+            available_services,
+            default=available_services,
+            key="discover_services",
+            help="Select which streaming services to include. Movies not on any selected service are omitted.",
+        )
+        disc_genre_name = st.selectbox("Genre filter", list(GENRES.keys()), key="discover_genre")
+        disc_genre_id = GENRES[disc_genre_name]
+        max_discover_results = st.slider("Max titles to load", min_value=20, max_value=200, value=50, step=10, key="discover_max_results")
+
+    # One search field for all: title, actor, director, genre, plot overview
+    search_query = st.text_input(
+        "Search titles, actors, directors, genres, or descriptions",
+        placeholder="e.g. millie, nolan, comedy, space, denzel...",
+        key="disc_universal_search_input",
+    )
+
+    results: list = []
+    if search_query.strip():
+        with st.spinner(f"Searching for '{search_query.strip()}' on streaming services in {disc_region_name}..."):
+            raw_results = md.search_universal(
+                search_query.strip(),
+                disc_region,
+                disc_services,
+                max_results=max_discover_results,
+            )
+            # Apply genre filter if selected
+            if disc_genre_id is not None:
+                results = [r for r in raw_results if disc_genre_name in r.get("genres", "")]
+            else:
+                results = raw_results
+    else:
+        # Default view: load popular available movies from local DB
+        with st.spinner(f"Loading streaming movies for {disc_region_name}..."):
+            raw_results = md.fallback_local_search("", disc_region, disc_services)
+            if disc_genre_id is not None:
+                results = [r for r in raw_results if disc_genre_name in r.get("genres", "")]
+            else:
+                results = raw_results[:max_discover_results]
+
+    # Enforce strictly: NEVER display any movie without streaming services
+    results = [r for r in results if r.get("services") and r.get("services").strip()]
+
+    if not results:
+        st.info("No matching movies found available on the selected streaming services.")
+    else:
+        movie_frame = pd.DataFrame(results)
+
+        for col in ["movie_id", "title", "year", "tmdb_rating", "imdb_rating", "tmdb_votes", "genres", "directors", "actors", "services", "overview", "poster_path", "runtime"]:
+            if col not in movie_frame.columns:
+                movie_frame[col] = None
+
+        movie_frame["year"] = pd.to_numeric(movie_frame["year"], errors="coerce")
+        movie_frame["tmdb_rating"] = pd.to_numeric(movie_frame["tmdb_rating"], errors="coerce")
+        movie_frame["tmdb_votes"] = pd.to_numeric(movie_frame["tmdb_votes"], errors="coerce")
+
+        # Static columns identical to solo_browser_app
+        visible_columns = ["movie_id", "title", "year", "tmdb_rating", "imdb_rating", "tmdb_votes", "genres", "directors", "actors", "services"]
+        grid_frame = movie_frame[visible_columns].copy()
+
+        grid_builder = GridOptionsBuilder.from_dataframe(grid_frame)
+        grid_builder.configure_column("movie_id", hide=True)
+        grid_builder.configure_column("title", header_name="Title", filter="agTextColumnFilter", flex=3, minWidth=220)
+        grid_builder.configure_column("year", header_name="Year", filter="agNumberColumnFilter", type=["numericColumn"], flex=1, minWidth=90)
+        grid_builder.configure_column("tmdb_rating", header_name="TMDB Rating", filter="agNumberColumnFilter", type=["numericColumn"], flex=1, minWidth=110)
+        grid_builder.configure_column("imdb_rating", header_name="IMDb Rating", filter="agNumberColumnFilter", type=["numericColumn"], flex=1, minWidth=110)
+        grid_builder.configure_column("tmdb_votes", header_name="TMDB Votes", filter="agNumberColumnFilter", type=["numericColumn"], flex=1, minWidth=110)
+        grid_builder.configure_column("genres", header_name="Genres", filter="agTextColumnFilter", flex=2, minWidth=180)
+        grid_builder.configure_column("directors", header_name="Directors", filter="agTextColumnFilter", flex=2, minWidth=180)
+        grid_builder.configure_column("actors", header_name="Actors", filter="agTextColumnFilter", flex=3, minWidth=220)
+        grid_builder.configure_column("services", header_name="Services", filter="agTextColumnFilter", flex=2, minWidth=180)
+        grid_builder.configure_default_column(resizable=True, sortable=True, floatingFilter=True)
+        grid_builder.configure_selection(selection_mode="single", use_checkbox=False)
+        grid_builder.configure_grid_options(rowHeight=32)
+        grid_options = grid_builder.build()
+
+        st.caption(f"Showing **{len(grid_frame)}** available streaming titles in {disc_region_name}. Click any row to view full details.")
+
+        grid_response = AgGrid(
+            grid_frame,
+            gridOptions=grid_options,
+            data_return_mode=DataReturnMode.FILTERED_AND_SORTED,
+            update_mode=GridUpdateMode.SELECTION_CHANGED,
+            columns_auto_size_mode=ColumnsAutoSizeMode.FIT_CONTENTS,
+            height=620,
+            theme="streamlit",
+        )
+
+        selected_row_data = grid_response.get("selected_rows")
+        selected_dict = None
+        if selected_row_data is not None:
+            if isinstance(selected_row_data, pd.DataFrame) and not selected_row_data.empty:
+                selected_dict = selected_row_data.iloc[0].to_dict()
+            elif isinstance(selected_row_data, list) and len(selected_row_data) > 0:
+                selected_dict = selected_row_data[0]
+            elif hasattr(selected_row_data, "iloc") and len(selected_row_data) > 0:
+                try:
+                    selected_dict = selected_row_data.iloc[0].to_dict()
+                except Exception:
+                    pass
+
+        if selected_dict:
+            sel_mid = selected_dict.get("movie_id")
+            dismissed_mid = st.session_state.get("disc_dismissed_movie_id")
+            if sel_mid is not None and st.session_state.get("disc_selected_movie_id") != sel_mid and sel_mid != dismissed_mid:
+                st.session_state["disc_selected_movie_id"] = sel_mid
+                st.session_state["disc_dismissed_movie_id"] = None
+                st.rerun()
+
+        active_mid = st.session_state.get("disc_selected_movie_id")
+        if active_mid is not None:
+            lookup = movie_frame[movie_frame["movie_id"] == active_mid]
+            full_row = lookup.iloc[0].to_dict() if not lookup.empty else {"movie_id": active_mid, "title": "Movie details"}
+
+            # Enrich details (director, cast, runtime) if missing
+            if not full_row.get("directors") or not full_row.get("actors"):
+                enrichment = md.fetch_movie_enrichment_tmdb(int(active_mid), disc_region)
+                if enrichment:
+                    if enrichment.get("directors"):
+                        full_row["directors"] = ", ".join(enrichment["directors"])
+                    if enrichment.get("cast"):
+                        full_row["actors"] = ", ".join(enrichment["cast"])
+                    if enrichment.get("runtime"):
+                        full_row["runtime"] = enrichment["runtime"]
+
+            def close_disc_dialog():
+                st.session_state["disc_dismissed_movie_id"] = active_mid
+                st.session_state["disc_selected_movie_id"] = None
+
+            @st.dialog(full_row.get("title") or "Movie details", width="large", on_dismiss=close_disc_dialog)
+            def show_disc_movie_dialog():
+                poster = full_row.get("poster_path")
+                left, right = st.columns([1, 2])
+                with left:
+                    if poster:
+                        st.image(f"{TMDB_IMAGE_BASE}{poster}", width="stretch")
+                with right:
+                    hdr = []
+                    y_val = full_row.get("year")
+                    if y_val is not None and not pd.isna(y_val) and str(y_val).strip():
+                        try:
+                            hdr.append(str(int(float(y_val))))
+                        except (ValueError, TypeError):
+                            hdr.append(str(y_val))
+
+                    rt_val = full_row.get("runtime")
+                    if rt_val is not None and not pd.isna(rt_val):
+                        try:
+                            rt_int = int(float(rt_val))
+                            if rt_int > 0:
+                                h, m = divmod(rt_int, 60)
+                                hdr.append(f"{h}h {m}m" if h else f"{m}m")
+                        except (ValueError, TypeError):
+                            pass
+
+                    r_val = full_row.get("tmdb_rating")
+                    if r_val is not None and not pd.isna(r_val):
+                        try:
+                            hdr.append(f"TMDB ⭐ {float(r_val):.1f}")
+                        except (ValueError, TypeError):
+                            pass
+
+                    ir_val = full_row.get("imdb_rating")
+                    if ir_val is not None and not pd.isna(ir_val):
+                        try:
+                            hdr.append(f"IMDb ⭐ {float(ir_val):.1f}")
+                        except (ValueError, TypeError):
+                            pass
+
+                    v_val = full_row.get("tmdb_votes")
+                    if v_val is not None and not pd.isna(v_val):
+                        try:
+                            hdr.append(f"{int(float(v_val)):,} votes")
+                        except (ValueError, TypeError):
+                            pass
+
+                    if hdr:
+                        st.caption(" | ".join(hdr))
+                    if full_row.get("genres"):
+                        st.markdown(f"**Genres:** {full_row['genres']}")
+                    if full_row.get("overview"):
+                        st.write(full_row["overview"])
+                    if full_row.get("directors"):
+                        st.markdown(f"**Director(s):** {full_row['directors']}")
+                    if full_row.get("actors"):
+                        st.markdown(f"**Cast:** {full_row['actors']}")
+                    st.divider()
+                    svcs = full_row.get("services")
+                    if svcs:
+                        st.success(f"📺 **Available on:** {svcs} ({disc_region_name})")
+
+            show_disc_movie_dialog()
+
+    st.stop()  # Skip rest of WatchMatch UI
+
+
 
 # Standard Streamlit theme layout
-st.markdown(
+st.html(
     """
     <style>
     section[data-testid="stSidebar"] div[data-testid="stButton"]:has(button[key*="hidden_"]),
@@ -745,11 +980,10 @@ st.markdown(
         margin-bottom: 4px;
     }
     </style>
-    """,
-    unsafe_allow_html=True
+    """
 )
 
-components.html(
+st.html(
     """
     <script>
     function bindShortcuts(doc) {
@@ -774,12 +1008,6 @@ components.html(
                 const hBtn = buttons.find(b => b.innerText.trim() === 'Help' || b.innerText.includes('Help'));
                 if (hBtn) {
                     hBtn.click();
-                    handled = true;
-                }
-            } else if (key === 'l') {
-                const lBtn = buttons.find(b => b.innerText.includes('Movie List'));
-                if (lBtn) {
-                    lBtn.click();
                     handled = true;
                 }
             } else if (key === 'r') {
@@ -811,8 +1039,7 @@ components.html(
     [parentDoc, localDoc].forEach(bindShortcuts);
     </script>
     """,
-    height=0,
-    width=0,
+    unsafe_allow_javascript=True,
 )
 
 
@@ -820,10 +1047,10 @@ components.html(
 def show_help_dialog():
     st.markdown(
         """
-    **Welcome to WatchMatch v2!**
+    **Welcome to WatchMatch!**
     - **Step 1:** Enter your name, choose streaming services, and optionally provide your Letterboxd username & consent.
     - **Step 2:** Join the room and wait for your group of friends.
-    - **Step 3:** Choose a group activity in Watch Party Setup, or select **Browse the local movie library** when you want to explore on your own.
+    - **Step 3:** Start the group match in Watch Party Setup, or select **Browse local library** in the side panel when you want to explore on your own.
 
     ### 🎬 Modes
     - **Group Match:** Personalized candidate pool combining Letterboxd watchlists, high ratings, and group streaming availability. Pick up to 5 movies, then vote for your top 3 choices in Phase 2!
@@ -832,50 +1059,9 @@ def show_help_dialog():
     ---
     *Keyboard Shortcuts:*
     - **H**: Show help menu.
-    - **L**: Open ranked movie list.
     - **Spacebar**: Manual status refresh.
     """
     )
-
-
-@st.dialog("Movie List", width="large")
-def show_movie_list_dialog():
-    region = lobby.get("region", "FI")
-    provider_ids = get_combined_provider_ids()
-
-    with st.spinner("Fetching movies and checking streaming services..."):
-        try:
-            genre_id = GENRES[lobby["genre"]] if lobby.get("genre") else None
-            ranked_movies = fetch_ranked_movies(genre_id, provider_ids, LIST_BATCH_SIZE, region)
-            ranked_movies = enrich_with_imdb(ranked_movies)
-        except Exception:
-            ranked_movies = []
-
-        if not ranked_movies:
-            st.info("No movies found for the selected criteria and streaming services.")
-            return
-
-        shared_services = get_combined_service_names()
-        rows = []
-        for movie in ranked_movies:
-            providers = fetch_movie_watch_providers(movie["id"], region)
-            available_on = [p for p in providers if p in shared_services]
-            service = ", ".join(available_on) if available_on else "N/A"
-
-            rows.append(
-                {
-                    "Title": movie.get("title", "Untitled"),
-                    "Streaming Service": service,
-                    "Popularity": round(_safe_float(movie.get("popularity")), 2),
-                    "TMDB Rating": movie.get("vote_average", "N/A"),
-                    "IMDb Rating": movie.get("imdb_rating", "N/A"),
-                    "Year": (movie.get("release_date", "") or "")[:4],
-                }
-            )
-
-    genre_text = f"'{lobby['genre']}'" if lobby.get("genre") else "Any Genre"
-    st.caption(f"Showing top movies sorted by Popularity for {genre_text} on shared streaming services.")
-    st.dataframe(rows, width="stretch", hide_index=True)
 
 
 @st.dialog("Reset WatchMatch")
@@ -890,55 +1076,62 @@ def show_reset_dialog():
             st.error("Type reset exactly to confirm.")
 
 
-with st.sidebar:
-    with st.container():
-        st.markdown('<div style="display: none;">', unsafe_allow_html=True)
-        if st.button("Help", key="hidden_help_btn"):
-            show_help_dialog()
-        if st.button("Movie List", key="hidden_movie_list_btn"):
-            show_movie_list_dialog()
-        if st.button("Reset", key="hidden_reset_btn"):
-            show_reset_dialog()
-        if st.button("Auto Refresh", key="hidden_auto_refresh_btn"):
-            st.rerun()
-        st.markdown('</div>', unsafe_allow_html=True)
-
-if st.session_state.get("user_name"):
-    st.sidebar.divider()
-    with st.sidebar.expander("🚪 Leave / Change Profile"):
-        st.write("Leave the lobby to re-join with a different name or services.")
-        if st.button("Leave Session", width="stretch", key="sidebar_leave_btn"):
-            leave_lobby(st.session_state.user_name)
-            st.rerun()
-
-with st.sidebar.expander("⚠️ Reset Session"):
-    st.write("This clears all active users, votes, and matches.")
-    confirmation = st.text_input("Type 'reset' to confirm", key="sidebar_reset_confirmation", label_visibility="collapsed")
-    if st.button("Reset Everything", type="primary", width="stretch", key="sidebar_reset_btn"):
-        if confirmation.strip().lower() == "reset":
-            reset_lobby()
-            st.rerun()
-        else:
-            st.error("Type reset exactly to confirm.")
-
-st.title("🍿 WatchMatch v2")
-region_label = next((name for name, code in REGIONS.items() if code == lobby.get("region", "FI")), "your region")
-st.markdown(f"Personalized movie selection powered by Letterboxd & local SQLite database ({region_label})")
-
-refresh_col, menu_col, _ = st.columns([1.2, 1.8, 5])
-with refresh_col:
-    if st.button("🔄 Refresh", key="top_refresh_button"):
-        st.rerun()
-with menu_col:
-    if st.button("📊 Movie List", key="top_ranked_list_btn"):
-        show_movie_list_dialog()
-
 if "user_name" not in st.session_state:
     st.session_state.user_name = None
 if "app_view" not in st.session_state:
     st.session_state.app_view = "group"
 
 user_name = st.session_state.user_name
+
+with st.sidebar:
+    with st.container():
+        st.markdown('<div style="display: none;">', unsafe_allow_html=True)
+        if st.button("Help", key="hidden_help_btn"):
+            show_help_dialog()
+        if st.button("Reset", key="hidden_reset_btn"):
+            show_reset_dialog()
+        if st.button("Auto Refresh", key="hidden_auto_refresh_btn"):
+            st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    if st.session_state.app_view == "solo":
+        if st.button("👥 Return to Watch Party", width="stretch", key="sidebar_view_group_btn"):
+            st.session_state.app_view = "group"
+            st.rerun()
+    else:
+        if st.button(
+            "Browse local library",
+            icon=":material/database:",
+            width="stretch",
+            key="sidebar_view_solo_btn",
+        ):
+            st.session_state.app_view = "solo"
+            st.rerun()
+
+    if st.session_state.get("user_name"):
+        st.divider()
+        with st.expander("🚪 Leave / Change Profile"):
+            st.write("Leave the lobby to re-join with a different name or services.")
+            if st.button("Leave Session", width="stretch", key="sidebar_leave_btn"):
+                leave_lobby(st.session_state.user_name)
+                st.rerun()
+
+    with st.expander("⚠️ Reset Session"):
+        st.write("This clears all active users, votes, and matches.")
+        confirmation = st.text_input("Type 'reset' to confirm", key="sidebar_reset_confirmation", label_visibility="collapsed")
+        if st.button("Reset Everything", type="primary", width="stretch", key="sidebar_reset_btn"):
+            if confirmation.strip().lower() == "reset":
+                reset_lobby()
+                st.rerun()
+            else:
+                st.error("Type reset exactly to confirm.")
+
+st.title("🍿 WatchMatch")
+region_label = next((name for name, code in REGIONS.items() if code == lobby.get("region", "FI")), "your region")
+st.markdown(f"Personalized movie selection powered by Letterboxd & local SQLite database ({region_label})")
+
+if st.button("🔄 Refresh", key="top_refresh_button"):
+    st.rerun()
 
 # Solo browsing is a separate activity, entered from the lobby or group setup.
 # Keeping it out of the global header avoids making it look like part of every
@@ -1056,7 +1249,7 @@ if not user_name:
         st.divider()
         st.markdown("##### 🎬 Optional Letterboxd Personalization")
         lb_consent = st.checkbox("☑ Sync my Letterboxd taste & watchlist for group recommendations", value=True, key="join_lb_consent")
-        lb_username = st.text_input("Letterboxd Username", placeholder="e.g. birgirm", key="join_lb_username").strip()
+        lb_username = st.text_input("Letterboxd Username", placeholder="user name", key="join_lb_username").strip()
 
         if st.button("Join Room", type="primary", width="stretch"):
             join_name = join_name.strip()
@@ -1097,17 +1290,6 @@ if not user_name:
                 st.rerun()
             else:
                 st.error("Please enter your name to join.")
-
-        st.divider()
-        st.caption("Not joining a room right now?")
-        if st.button(
-            "Browse the local movie library",
-            icon=":material/database:",
-            key="join_solo_browser",
-            width="stretch",
-        ):
-            st.session_state.app_view = "solo"
-            st.rerun()
 else:
     if lobby["match"]:
         st.success("🎉 IT'S A MATCH! 🎉")
@@ -1138,11 +1320,11 @@ else:
             for item in ranked:
                 m = item["movie"]
                 rows.append({
-                    "Stars": item["final_stars"],
+                    "Stars": int(item["final_stars"]),
                     "Title": m.get("title", "Untitled"),
-                    "TMDB Popularity": round(item["popularity"], 2),
-                    "TMDB Rating": m.get("vote_average", "N/A"),
-                    "IMDb Rating": m.get("imdb_rating", "N/A"),
+                    "TMDB Popularity": round(_safe_float(item["popularity"]), 2),
+                    "TMDB Rating": f"{float(m['vote_average']):.1f}" if m.get("vote_average") is not None else "N/A",
+                    "IMDb Rating": f"{float(m['imdb_rating']):.1f}" if m.get("imdb_rating") else "N/A",
                 })
             st.dataframe(rows, hide_index=True, width="stretch")
 
@@ -1171,8 +1353,8 @@ else:
                 "Name": name,
                 "Services": ", ".join(data.get("services", [])) or "—",
                 "Letterboxd": data.get("letterboxd_username") or "—",
-                "Watched": s.get("watched_count", "—"),
-                "Watchlist": s.get("watchlist_count", "—"),
+                "Watched": str(s.get("watched_count")) if s.get("watched_count") is not None else "—",
+                "Watchlist": str(s.get("watchlist_count")) if s.get("watchlist_count") is not None else "—",
             })
         st.dataframe(rows, hide_index=True, width="stretch")
 
@@ -1192,11 +1374,11 @@ else:
                     wl_rows = []
                     for item in items:
                         wl_rows.append({
-                            "Title": item.get("title", "—"),
-                            "Year": item.get("year") or "—",
-                            "Rating": item.get("rating") or "—",
+                            "Title": str(item.get("title") or "—"),
+                            "Year": str(item.get("year")) if item.get("year") else "—",
+                            "Rating": str(item.get("rating")) if item.get("rating") else "—",
                             "Liked": "❤️" if item.get("liked") else "",
-                            "Link": item.get("film_link", ""),
+                            "Link": str(item.get("film_link") or ""),
                         })
                     st.dataframe(wl_rows, hide_index=True, width="stretch")
 
@@ -1210,27 +1392,10 @@ else:
         genre_name = st.selectbox("Genre", genre_keys)
         effective_genre = None if genre_name == "All" else genre_name
 
-        mode_col_a, mode_col_b = st.columns(2)
-        with mode_col_a:
-            if st.button("Start Group Match", type="primary", key="setup_movie_ranking_btn", width="stretch"):
-                if not start_matching("rating", effective_genre):
-                    st.error("No movies found for this combination of genre and streaming services.")
-            st.caption("Pick up to five personalized movie choices.")
-        with mode_col_b:
-            if st.button("Group Browse Grid", type="secondary", key="setup_movie_list_btn", width="stretch"):
-                if not start_browsing(effective_genre):
-                    st.error("No movies found for this combination of genre and streaming services.")
-            st.caption("Browse 96 movies at a time.")
-        st.divider()
-        if st.button(
-            "Browse local library",
-            icon=":material/database:",
-            key="setup_solo_browser",
-            width="stretch",
-        ):
-            st.session_state.app_view = "solo"
-            st.rerun()
-        st.caption("Explore saved movies without changing the group session.")
+        if st.button("Start Group Match", type="primary", key="setup_movie_ranking_btn", width="stretch"):
+            if not start_matching("rating", effective_genre):
+                st.error("No movies found for this combination of genre and streaming services.")
+        st.caption("Pick up to five personalized movie choices.")
 
     elif lobby["state"] == "RATING":
         st.subheader(f"Genre: {lobby['genre'] or 'Any Genre'} - Phase 1: Pick your movies")
