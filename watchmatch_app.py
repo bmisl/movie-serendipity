@@ -23,7 +23,15 @@ if sys.platform == "win32":
 import requests
 import streamlit as st
 
-from app_config import DB_PATH, GENRES, REGION_PROVIDERS, REGIONS, get_secret
+from app_config import (
+    DB_PATH,
+    GENRES,
+    REGION_PROVIDERS,
+    REGIONS,
+    get_db_connection,
+    get_secret,
+    is_turso_configured,
+)
 from letterboxd_profile import clean_title, parse_rating
 from letterboxd_source_probe import probe_source
 
@@ -42,31 +50,149 @@ MAX_MOVIE_PICKS = 5
 
 
 # ==============================================================================
-# LOCAL SQLITE DATABASE LAYER (movies.sqlite)
+# DATABASE LAYER (Turso Cloud / Local SQLite)
 # ==============================================================================
+
+def _safe_float(value: Any, default: Any = 0.0) -> Any:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def get_db_path() -> Path:
+    return Path(DB_PATH)
+
+
+def try_ensure_database_file() -> None:
+    """Download the SQLite database in cloud deployments if DB_DOWNLOAD_URL or DB_FILE_ID is configured."""
+    if is_turso_configured():
+        return
+    db_path = get_db_path()
+    if db_path.exists():
+        return
+    if get_secret("DB_DOWNLOAD_URL") or get_secret("DB_FILE_ID"):
+        try:
+            from app_config import ensure_database_file
+            ensure_database_file(str(db_path))
+        except Exception as e:
+            print(f"Notice: Automatic DB download skipped or failed: {e}")
+
+
+def init_db_schema() -> None:
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS movies (
+        movie_id INTEGER PRIMARY KEY,
+        title TEXT NOT NULL,
+        year INTEGER,
+        release_date TEXT,
+        tmdb_rating REAL,
+        tmdb_votes INTEGER,
+        genres TEXT,
+        overview TEXT,
+        poster_path TEXT,
+        popularity REAL,
+        runtime INTEGER,
+        directors TEXT,
+        actors TEXT,
+        last_updated TEXT,
+        imdb_id TEXT,
+        imdb_rating REAL,
+        imdb_votes INTEGER
+    )
+    """)
+    # Ensure existing movies table gets any missing columns (e.g. from older database files)
+    existing_cols = {row[1] for row in cur.execute("PRAGMA table_info(movies)").fetchall()}
+    for col_name, col_type in [("imdb_id", "TEXT"), ("imdb_rating", "REAL"), ("imdb_votes", "INTEGER")]:
+        if col_name not in existing_cols:
+            cur.execute(f"ALTER TABLE movies ADD COLUMN {col_name} {col_type}")
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS availability (
+        movie_id INTEGER NOT NULL,
+        region_code TEXT NOT NULL,
+        services TEXT,
+        last_updated TEXT,
+        PRIMARY KEY (movie_id, region_code),
+        FOREIGN KEY (movie_id) REFERENCES movies(movie_id) ON DELETE CASCADE
+    )
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS letterboxd_cache (
+        letterboxd_slug TEXT PRIMARY KEY,
+        tmdb_id INTEGER,
+        title TEXT,
+        year INTEGER,
+        last_updated TEXT
+    )
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS ratings (
+        movie_id INTEGER NOT NULL,
+        source TEXT NOT NULL,
+        rating REAL,
+        votes INTEGER,
+        last_updated TEXT,
+        PRIMARY KEY (movie_id, source),
+        FOREIGN KEY (movie_id) REFERENCES movies(movie_id) ON DELETE CASCADE
+    )
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS sync_log (
+        region_code TEXT PRIMARY KEY,
+        last_sync TEXT NOT NULL,
+        movies_synced INTEGER DEFAULT 0
+    )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_movies_year ON movies(year)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_movies_pop ON movies(popularity DESC)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_avail_region ON availability(region_code)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_movies_imdb_id ON movies(imdb_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ratings_source ON ratings(source)")
+    conn.commit()
+    conn.close()
+
+
+try_ensure_database_file()
+init_db_schema()
+
 
 def enrich_with_imdb(movies: List[dict]) -> List[dict]:
     if not movies:
         return movies
     
-    conn = get_db_connection()
-    movie_ids = [m["id"] for m in movies]
-    placeholders = ",".join("?" for _ in movie_ids)
-    cur = conn.cursor()
-    cur.execute(
-        f"""
-        SELECT m.movie_id, m.imdb_id, r.rating AS imdb_rating, r.votes AS imdb_votes
-        FROM movies m
-        LEFT JOIN ratings r ON m.movie_id = r.movie_id AND r.source = 'imdb'
-        WHERE m.movie_id IN ({placeholders})
-        """,
-        tuple(movie_ids),
-    )
-    db_info = {row["movie_id"]: dict(row) for row in cur.fetchall()}
-    conn.close()
+    db_info: Dict[int, dict] = {}
+    try:
+        conn = get_db_connection()
+        movie_ids = [m["id"] for m in movies if m.get("id")]
+        if movie_ids:
+            placeholders = ",".join("?" for _ in movie_ids)
+            cur = conn.cursor()
+            cur.execute(
+                f"""
+                SELECT m.movie_id, m.imdb_id,
+                       COALESCE(r.rating, m.imdb_rating) AS imdb_rating,
+                       COALESCE(r.votes, m.imdb_votes) AS imdb_votes
+                FROM movies m
+                LEFT JOIN ratings r ON m.movie_id = r.movie_id AND r.source = 'imdb'
+                WHERE m.movie_id IN ({placeholders})
+                """,
+                tuple(movie_ids),
+            )
+            db_info = {row["movie_id"]: dict(row) for row in cur.fetchall()}
+        conn.close()
+    except Exception as e:
+        print(f"Warning: Failed to fetch IMDb ratings from database: {e}")
+        db_info = {}
     
     def fetch_omdb(m):
-        mid = m["id"]
+        mid = m.get("id")
+        if not mid:
+            return None
         info = db_info.get(mid, {})
         if info.get("imdb_rating") is not None:
             m["imdb_rating"] = info["imdb_rating"]
@@ -74,10 +200,13 @@ def enrich_with_imdb(movies: List[dict]) -> List[dict]:
             m["imdb_id"] = info.get("imdb_id")
             return None
         
+        if not OMDB_API_KEY:
+            return None
+
         try:
             # Step 1: get imdb_id from TMDB external_ids (exact match, no year guessing)
             imdb_id = info.get("imdb_id")
-            if not imdb_id:
+            if not imdb_id and TMDB_API_KEY:
                 ext_res = requests.get(
                     f"{TMDB_BASE_URL}/movie/{mid}/external_ids",
                     params={"api_key": TMDB_API_KEY},
@@ -91,6 +220,8 @@ def enrich_with_imdb(movies: List[dict]) -> List[dict]:
                 omdb_url = f"http://www.omdbapi.com/?apikey={OMDB_API_KEY}&i={imdb_id}"
             else:
                 title = m.get("title", "")
+                if not title:
+                    return None
                 omdb_url = f"http://www.omdbapi.com/?apikey={OMDB_API_KEY}&t={requests.utils.quote(title)}"
 
             res = requests.get(omdb_url, timeout=5)
@@ -115,75 +246,33 @@ def enrich_with_imdb(movies: List[dict]) -> List[dict]:
     updates = [r for r in results if r is not None]
     
     if updates:
-        conn = get_db_connection()
-        conn.executemany("""
-            UPDATE movies SET imdb_id=?, imdb_rating=?, imdb_votes=? WHERE movie_id=?
-        """, updates)
-        conn.commit()
-        conn.close()
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.executemany("""
+                UPDATE movies SET imdb_id=?, imdb_rating=?, imdb_votes=? WHERE movie_id=?
+            """, updates)
+            now = datetime.now(timezone.utc).isoformat()
+            ratings_records = [
+                (mid, "imdb", r, v, now)
+                for (imdb_id, r, v, mid) in updates
+                if r is not None
+            ]
+            if ratings_records:
+                cur.executemany("""
+                    INSERT INTO ratings (movie_id, source, rating, votes, last_updated)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(movie_id, source) DO UPDATE SET
+                        rating = excluded.rating,
+                        votes = excluded.votes,
+                        last_updated = excluded.last_updated
+                """, ratings_records)
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"Warning: Failed to persist IMDb ratings in database: {e}")
         
     return movies
-
-def get_db_path() -> Path:
-    return Path(DB_PATH)
-
-
-def get_db_connection() -> sqlite3.Connection:
-    db_path = get_db_path()
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path), check_same_thread=False, timeout=30)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def init_db_schema() -> None:
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS movies (
-        movie_id INTEGER PRIMARY KEY,
-        title TEXT NOT NULL,
-        year INTEGER,
-        release_date TEXT,
-        tmdb_rating REAL,
-        tmdb_votes INTEGER,
-        genres TEXT,
-        overview TEXT,
-        poster_path TEXT,
-        popularity REAL,
-        runtime INTEGER,
-        directors TEXT,
-        actors TEXT,
-        last_updated TEXT
-    )
-    """)
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS availability (
-        movie_id INTEGER NOT NULL,
-        region_code TEXT NOT NULL,
-        services TEXT,
-        last_updated TEXT,
-        PRIMARY KEY (movie_id, region_code),
-        FOREIGN KEY (movie_id) REFERENCES movies(movie_id) ON DELETE CASCADE
-    )
-    """)
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS letterboxd_cache (
-        letterboxd_slug TEXT PRIMARY KEY,
-        tmdb_id INTEGER,
-        title TEXT,
-        year INTEGER,
-        last_updated TEXT
-    )
-    """)
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_movies_year ON movies(year)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_movies_pop ON movies(popularity DESC)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_avail_region ON availability(region_code)")
-    conn.commit()
-    conn.close()
-
-
-init_db_schema()
 
 
 def normalize_movie_record(movie: dict[str, Any]) -> dict[str, Any]:
@@ -310,15 +399,6 @@ def get_global_session() -> dict:
 
 
 lobby = get_global_session()
-
-
-def _safe_float(value: Any, default: float = 0.0) -> float:
-    try:
-        if value is None:
-            return default
-        return float(value)
-    except (TypeError, ValueError):
-        return default
 
 
 def sort_movies_by_popularity(movies: List[dict]) -> List[dict]:

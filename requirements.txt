@@ -5,3 +5,4 @@ pandas
 tqdm
 beautifulsoup4
 lxml
+libsql-client>=0.3.0

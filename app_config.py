@@ -73,7 +73,7 @@ GENRES: Dict[str, Optional[int]] = {
 }
 
 # ---------------------------------------------------------------------------
-# Database path
+# Database & Turso configuration
 # ---------------------------------------------------------------------------
 
 DB_PATH = "movies.sqlite"
@@ -85,6 +85,168 @@ def get_secret(key: str) -> Optional[str]:
     if hasattr(st, "secrets") and key in st.secrets:
         return st.secrets[key]
     return os.getenv(key)
+
+
+def is_turso_configured() -> bool:
+    """Return True if Turso database credentials are provided."""
+    return bool(get_secret("TURSO_DATABASE_URL") and get_secret("TURSO_AUTH_TOKEN"))
+
+
+class TursoRow:
+    """Dictionary-accessible, tuple-accessible row wrapper for Turso."""
+
+    def __init__(self, cols: List[str], values: List[Any]):
+        self._dict = dict(zip(cols, values))
+        self._values = tuple(values)
+
+    def __getitem__(self, key: Any) -> Any:
+        if isinstance(key, int):
+            return self._values[key]
+        return self._dict[key]
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self._dict.get(key, default)
+
+    def keys(self):
+        return self._dict.keys()
+
+    def values(self):
+        return self._dict.values()
+
+    def items(self):
+        return self._dict.items()
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._dict
+
+    def __iter__(self):
+        return iter(self._dict)
+
+    def __len__(self) -> int:
+        return len(self._dict)
+
+    def __repr__(self) -> str:
+        return f"<TursoRow {self._dict}>"
+
+
+class TursoCursor:
+    """DB-API compatible cursor wrapping libsql-client."""
+
+    def __init__(self, client: Any):
+        self._client = client
+        self._rows: List[TursoRow] = []
+        self._idx = 0
+        self.rowcount = -1
+        self.description = None
+
+    def execute(self, sql: str, params: Any = ()):
+        if isinstance(params, (list, tuple)):
+            clean_params = list(params)
+        elif params is None:
+            clean_params = []
+        else:
+            clean_params = [params]
+
+        res = self._client.execute(sql, clean_params)
+        cols = list(res.columns) if hasattr(res, "columns") else []
+        self._rows = [TursoRow(cols, r) for r in res.rows] if hasattr(res, "rows") else []
+        self._idx = 0
+        self.rowcount = getattr(res, "rows_affected", len(self._rows))
+        self.description = [(col, None, None, None, None, None, None) for col in cols]
+        return self
+
+    def executemany(self, sql: str, seq_of_params: Any):
+        if not seq_of_params:
+            return self
+        import libsql_client
+        stmts = [
+            libsql_client.Statement(sql, list(p) if isinstance(p, (list, tuple)) else [p])
+            for p in seq_of_params
+        ]
+        self._client.batch(stmts)
+        self._rows = []
+        self._idx = 0
+        return self
+
+    def fetchone(self) -> Optional[TursoRow]:
+        if self._idx < len(self._rows):
+            row = self._rows[self._idx]
+            self._idx += 1
+            return row
+        return None
+
+    def fetchall(self) -> List[TursoRow]:
+        remaining = self._rows[self._idx:]
+        self._idx = len(self._rows)
+        return remaining
+
+    def fetchmany(self, size: Optional[int] = None) -> List[TursoRow]:
+        n = size if size is not None else 1
+        sub = self._rows[self._idx:self._idx + n]
+        self._idx += len(sub)
+        return sub
+
+    def close(self):
+        self._rows = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
+
+class TursoConnection:
+    """DB-API compatible connection wrapping libsql-client over HTTPS."""
+
+    def __init__(self, url: str, auth_token: str):
+        import libsql_client
+        clean_url = url.replace("libsql://", "https://")
+        self._client = libsql_client.create_client_sync(url=clean_url, auth_token=auth_token)
+
+    def cursor(self) -> TursoCursor:
+        return TursoCursor(self._client)
+
+    def execute(self, sql: str, params: Any = ()):
+        cur = self.cursor()
+        return cur.execute(sql, params)
+
+    def executemany(self, sql: str, seq_of_params: Any):
+        cur = self.cursor()
+        return cur.executemany(sql, seq_of_params)
+
+    def commit(self):
+        pass
+
+    def rollback(self):
+        pass
+
+    def close(self):
+        try:
+            self._client.close()
+        except Exception:
+            pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
+
+def get_db_connection():
+    """Return a live Turso connection if configured, otherwise local SQLite connection."""
+    if is_turso_configured():
+        url = get_secret("TURSO_DATABASE_URL")
+        token = get_secret("TURSO_AUTH_TOKEN")
+        return TursoConnection(url, token)
+
+    import sqlite3
+    db_path = Path(DB_PATH)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_path), check_same_thread=False, timeout=30)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
 def build_drive_download_url(file_id: str) -> str:

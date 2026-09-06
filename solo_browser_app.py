@@ -27,7 +27,15 @@ from st_aggrid import (
     GridUpdateMode,
 )
 
-from app_config import GENRES, REGION_PROVIDERS, REGIONS, DB_PATH, get_secret
+from app_config import (
+    GENRES,
+    REGION_PROVIDERS,
+    REGIONS,
+    DB_PATH,
+    get_db_connection,
+    get_secret,
+    is_turso_configured,
+)
 
 TMDB_BASE_URL = "https://api.themoviedb.org/3"
 TMDB_IMAGE_BASE = "https://image.tmdb.org/t/p/w342"
@@ -64,10 +72,8 @@ st.set_page_config(
 def get_db_path() -> Path:
     return Path(DB_PATH)
 
-def get_connection() -> sqlite3.Connection:
-    conn = sqlite3.connect(str(get_db_path()), check_same_thread=False, timeout=30)
-    conn.row_factory = sqlite3.Row
-    return conn
+def get_connection():
+    return get_db_connection()
 
 def init_global_db():
     db_path = get_db_path()
@@ -96,6 +102,12 @@ def init_global_db():
         imdb_votes INTEGER
     )
     """)
+    # Ensure existing movies table gets any missing columns (e.g. from older database files)
+    existing_cols = {row[1] for row in cur.execute("PRAGMA table_info(movies)").fetchall()}
+    for col_name, col_type in [("imdb_id", "TEXT"), ("imdb_rating", "REAL"), ("imdb_votes", "INTEGER")]:
+        if col_name not in existing_cols:
+            cur.execute(f"ALTER TABLE movies ADD COLUMN {col_name} {col_type}")
+
     # Per-region availability - tiny rows
     cur.execute("""
     CREATE TABLE IF NOT EXISTS availability (
@@ -104,6 +116,17 @@ def init_global_db():
         services TEXT,
         last_updated TEXT,
         PRIMARY KEY (movie_id, region_code),
+        FOREIGN KEY (movie_id) REFERENCES movies(movie_id) ON DELETE CASCADE
+    )
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS ratings (
+        movie_id INTEGER NOT NULL,
+        source TEXT NOT NULL,
+        rating REAL,
+        votes INTEGER,
+        last_updated TEXT,
+        PRIMARY KEY (movie_id, source),
         FOREIGN KEY (movie_id) REFERENCES movies(movie_id) ON DELETE CASCADE
     )
     """)
@@ -117,6 +140,8 @@ def init_global_db():
     cur.execute("CREATE INDEX IF NOT EXISTS idx_movies_year ON movies(year)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_movies_pop ON movies(popularity DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_avail_region ON availability(region_code)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_movies_imdb_id ON movies(imdb_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ratings_source ON ratings(source)")
     conn.commit()
     conn.close()
 
