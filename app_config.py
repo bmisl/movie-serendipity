@@ -142,6 +142,11 @@ class TursoCursor:
     def execute(self, sql: str, params: Any = ()):
         if isinstance(params, (list, tuple)):
             clean_params = list(params)
+        elif isinstance(params, dict):
+            # libsql-client supports named parameters directly. Wrapping the
+            # mapping in a list makes it look like a BLOB and raises
+            # ``memoryview: a bytes-like object is required`` over Turso.
+            clean_params = params
         elif params is None:
             clean_params = []
         else:
@@ -160,7 +165,10 @@ class TursoCursor:
             return self
         import libsql_client
         stmts = [
-            libsql_client.Statement(sql, list(p) if isinstance(p, (list, tuple)) else [p])
+            libsql_client.Statement(
+                sql,
+                list(p) if isinstance(p, (list, tuple)) else p if isinstance(p, dict) else [p],
+            )
             for p in seq_of_params
         ]
         self._client.batch(stmts)

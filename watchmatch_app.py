@@ -4,6 +4,7 @@ import sqlite3
 import sys
 import time
 import concurrent.futures
+import importlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -818,6 +819,63 @@ def fetch_movie_watch_providers(movie_id: int, region: str = "FI") -> List[str]:
         return []
 
 
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=100)
+def search_tmdb_movies_for_library(query: str, region: str) -> List[dict[str, Any]]:
+    """Return title matches from TMDB, whether or not they are in the library."""
+    if not TMDB_API_KEY or not query.strip():
+        return []
+
+    genre_names = {genre_id: name for name, genre_id in GENRES.items() if genre_id is not None}
+    matches: List[dict[str, Any]] = []
+    for page in range(1, 4):
+        try:
+            response = requests.get(
+                f"{TMDB_BASE_URL}/search/movie",
+                params={
+                    "api_key": TMDB_API_KEY,
+                    "query": query.strip(),
+                    "region": region,
+                    "include_adult": "false",
+                    "page": page,
+                },
+                timeout=10,
+            )
+            if response.status_code != 200:
+                break
+            payload = response.json()
+        except (requests.RequestException, ValueError):
+            break
+
+        for movie in payload.get("results", []):
+            movie_id = movie.get("id")
+            if not movie_id:
+                continue
+            release_date = movie.get("release_date") or ""
+            matches.append({
+                "id": movie_id,
+                "movie_id": movie_id,
+                "title": movie.get("title") or movie.get("original_title") or "Untitled",
+                "year": int(release_date[:4]) if release_date[:4].isdigit() else None,
+                "release_date": release_date,
+                "tmdb_rating": movie.get("vote_average") or 0.0,
+                "tmdb_votes": movie.get("vote_count") or 0,
+                "genres": [
+                    genre_names[genre_id]
+                    for genre_id in movie.get("genre_ids", [])
+                    if genre_id in genre_names
+                ],
+                "overview": movie.get("overview") or "",
+                "poster_path": movie.get("poster_path") or "",
+                "popularity": movie.get("popularity") or 0.0,
+                "available_on": "",
+            })
+            if len(matches) >= 20:
+                return matches
+        if page >= payload.get("total_pages", 1):
+            break
+    return matches
+
+
 st.set_page_config(page_title="WatchMatch", layout="wide", initial_sidebar_state="expanded")
 # Add page selector for multi-page UI
 st.sidebar.title("🔎 Choose Page")
@@ -827,6 +885,10 @@ if page_mode == "Discover":
     import pandas as pd
     from st_aggrid import AgGrid, ColumnsAutoSizeMode, DataReturnMode, GridOptionsBuilder, GridUpdateMode
     import movie_discovery as md
+    # Streamlit can reload this script before an imported helper module. Refresh
+    # the module once when running against a previously cached version.
+    if not hasattr(md, "search_tmdb_titles"):
+        md = importlib.reload(md)
 
     st.title("🔍 Discover Movies")
     st.caption("Search across titles, actors, directors, genres, and movie overviews — only titles available on streaming services are shown.")
@@ -855,9 +917,28 @@ if page_mode == "Discover":
         placeholder="e.g. millie, nolan, comedy, space, denzel...",
         key="disc_universal_search_input",
     )
+    search_tmdb = st.button(
+        "Search TMDB",
+        icon=":material/search:",
+        disabled=not bool(search_query.strip()),
+        key="discover_tmdb_search",
+        help="Searches TMDB directly for movie titles, actors, and directors, including results outside the shared library.",
+    )
 
     results: list = []
-    if search_query.strip():
+    if search_tmdb:
+        with st.spinner(f"Searching TMDB for '{search_query.strip()}' on streaming services in {disc_region_name}..."):
+            raw_results = md.search_tmdb_titles(
+                search_query.strip(),
+                disc_region,
+                disc_services,
+                max_results=max_discover_results,
+            )
+        if disc_genre_id is not None:
+            results = [result for result in raw_results if disc_genre_name in result.get("genres", "")]
+        else:
+            results = raw_results
+    elif search_query.strip():
         with st.spinner(f"Searching for '{search_query.strip()}' on streaming services in {disc_region_name}..."):
             raw_results = md.search_universal(
                 search_query.strip(),
@@ -1221,8 +1302,8 @@ if st.session_state.app_view == "solo":
         st.session_state.app_view = "group"
         st.rerun()
 
-    st.subheader("Browse the local movie library", anchor=False)
-    st.caption("Search movies already saved in movies.sqlite. This does not change your watch party.")
+    st.subheader("Browse the shared movie library", anchor=False)
+    st.caption("Search the shared library or TMDB. New title matches are saved to the online library and do not change your watch party.")
 
     region_names = list(REGIONS.keys())
     current_region_code = lobby.get("region", "FI")
@@ -1232,7 +1313,11 @@ if st.session_state.app_view == "solo":
     )
     col_search, col_genre, col_rating, col_region = st.columns([3, 2, 2, 2])
     with col_search:
-        search_query = st.text_input("Search Title", placeholder="e.g. Inception").strip()
+        search_query = st.text_input(
+            "Search title",
+            placeholder="e.g. Inception",
+            help="WatchMatch also searches TMDB and saves matching titles to the shared library.",
+        ).strip()
     with col_genre:
         browse_genre = st.selectbox("Genre Filter", ["All"] + [g for g in GENRES.keys() if g != "All"])
     with col_rating:
@@ -1251,6 +1336,26 @@ if st.session_state.app_view == "solo":
         key="solo_browse_services",
         placeholder="All saved services",
     )
+    search_tmdb = st.button(
+        "Search TMDB",
+        icon=":material/search:",
+        disabled=not bool(search_query),
+        key="solo_browse_tmdb_search",
+    )
+
+    # Keep TMDB matches separate from the shared-library query. This mirrors the
+    # enrichment tool: a search can find new titles, while saving is explicit.
+    if search_tmdb:
+        with st.spinner(f"Searching TMDB for '{search_query}'..."):
+            st.session_state.solo_browse_tmdb_results = search_tmdb_movies_for_library(
+                search_query,
+                browse_region,
+            )
+            st.session_state.solo_browse_tmdb_query = search_query
+
+    tmdb_results = []
+    if st.session_state.get("solo_browse_tmdb_query") == search_query:
+        tmdb_results = st.session_state.get("solo_browse_tmdb_results", [])
 
     conn = get_db_connection()
     cur = conn.cursor()
@@ -1283,16 +1388,47 @@ if st.session_state.app_view == "solo":
     sqlite_results = [dict(row) for row in cur.fetchall()]
     conn.close()
 
-    if not sqlite_results:
-        st.info("No matching movies found in local SQLite database. Try broadening your filter.")
+    if tmdb_results:
+        def matches_tmdb_filters(movie: dict[str, Any]) -> bool:
+            if float(movie.get("tmdb_rating") or 0) < min_rating:
+                return False
+            return browse_genre == "All" or browse_genre in movie.get("genres", [])
+
+        browse_results = [movie for movie in tmdb_results if matches_tmdb_filters(movie)]
+        st.caption(
+            f"TMDB found {len(tmdb_results)} title matches. These are live results and may not yet be in the shared library."
+        )
+        if browse_services:
+            st.caption("Service filtering applies after a title has been saved and its regional availability has been checked.")
+        if st.button(
+            "Save TMDB matches to shared library",
+            icon=":material/save:",
+            type="primary",
+            key="solo_browse_save_tmdb_results",
+        ):
+            for movie in tmdb_results:
+                upsert_movie_to_db(movie)
+            st.session_state.pop("solo_browse_tmdb_results", None)
+            st.session_state.pop("solo_browse_tmdb_query", None)
+            st.success(f"Saved {len(tmdb_results)} TMDB matches to the shared library.")
+            st.rerun()
+    elif st.session_state.get("solo_browse_tmdb_query") == search_query:
+        browse_results = []
+        st.info("TMDB did not find any title matches. Try another spelling or a broader title.")
     else:
-        st.write(f"Showing **{len(sqlite_results)}** movies from `movies.sqlite`:")
+        browse_results = sqlite_results
+
+    if not browse_results:
+        st.info("No matching movies found. Try broadening your filters or checking the title spelling.")
+    else:
+        if not tmdb_results:
+            st.write(f"Showing **{len(browse_results)}** movies from the shared library:")
         cols_per_row = 6
-        for i in range(0, len(sqlite_results), cols_per_row):
+        for i in range(0, len(browse_results), cols_per_row):
             cols = st.columns(cols_per_row)
             for j in range(cols_per_row):
-                if i + j < len(sqlite_results):
-                    movie = sqlite_results[i + j]
+                if i + j < len(browse_results):
+                    movie = browse_results[i + j]
                     with cols[j]:
                         with st.container(border=True):
                             if movie.get("poster_path"):

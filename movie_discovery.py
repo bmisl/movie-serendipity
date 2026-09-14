@@ -331,6 +331,91 @@ def search_universal(
     return trimmed
 
 
+def search_tmdb_titles(
+    query: str,
+    region: str,
+    services: Sequence[str],
+    max_results: int = 50,
+) -> List[dict]:
+    """Search TMDB directly for matching titles or people, without using the library."""
+    if not query or not query.strip():
+        return []
+
+    q = query.strip()
+    active_services = list(services) if services else list(REGION_PROVIDERS.get(region, {}).keys())
+    target_count = max_results * 3
+
+    # Search titles and people in parallel. The latter lets a direct search for
+    # an actor or director (for example, "Charlize Theron") return their films.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        person_future = executor.submit(tmdb_get, "/search/person", {"query": q, "page": 1})
+        movie_future = executor.submit(
+            tmdb_get,
+            "/search/movie",
+            {"query": q, "page": 1, "region": region, "include_adult": "false"},
+        )
+        person_data = person_future.result()
+        first_movie_page = movie_future.result()
+
+    combined_movies: Dict[int, dict] = {}
+    for movie in first_movie_page.get("results") or []:
+        movie_id = movie.get("id")
+        if movie_id:
+            combined_movies[movie_id] = movie
+
+    # Continue title pages when necessary, because availability filtering can
+    # remove many matches from the first page.
+    page = 2
+    while len(combined_movies) < target_count and page <= 5 and page <= first_movie_page.get("total_pages", 1):
+        payload = tmdb_get(
+            "/search/movie",
+            {
+                "query": q,
+                "page": page,
+                "region": region,
+                "include_adult": "false",
+            },
+        )
+        if not payload.get("results"):
+            break
+        for movie in payload["results"]:
+            movie_id = movie.get("id")
+            if movie_id:
+                combined_movies[movie_id] = movie
+        page += 1
+
+    person_results = person_data.get("results") or []
+    if person_results:
+        person = person_results[0]
+        person_id = person.get("id")
+        if person_id:
+            role_param = "with_crew" if (person.get("known_for_department") or "").lower() == "directing" else "with_cast"
+            discover_params: Dict[str, object] = {
+                role_param: person_id,
+                "sort_by": "popularity.desc",
+                "watch_region": region,
+                "page": 1,
+            }
+            provider_str = _provider_pipe(region, active_services)
+            if provider_str:
+                discover_params["with_watch_providers"] = provider_str
+                discover_params["with_ott_monetization_types"] = "flatrate|free|ads"
+            for movie in tmdb_get("/discover/movie", discover_params).get("results") or []:
+                movie_id = movie.get("id")
+                if movie_id:
+                    combined_movies[movie_id] = movie
+
+    normalised = [_normalise_movie(movie) for movie in combined_movies.values()]
+    filtered = filter_and_enrich_movies(
+        normalised,
+        region,
+        active_services,
+        require_services=True,
+    )
+    filtered.sort(key=lambda movie: movie["popularity"], reverse=True)
+    return filtered[:max_results]
+
+
 def fallback_local_search(term: str, region: str, services: Sequence[str]) -> List[dict]:
     conn = _get_conn()
     active_services = list(services) if services else list(REGION_PROVIDERS.get(region, {}).keys())
