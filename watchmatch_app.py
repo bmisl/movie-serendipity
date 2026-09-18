@@ -50,6 +50,16 @@ MATCH_POOL_SIZE = 120
 MAX_MOVIE_PICKS = 5
 
 
+@st.cache_resource
+def get_http_session() -> requests.Session:
+    """Reusable HTTP session with connection pooling for TMDB, OMDB, and Turso."""
+    s = requests.Session()
+    adapter = requests.adapters.HTTPAdapter(pool_connections=15, pool_maxsize=30, max_retries=2)
+    s.mount("https://", adapter)
+    s.mount("http://", adapter)
+    return s
+
+
 # ==============================================================================
 # DATABASE LAYER (Turso Cloud / Local SQLite)
 # ==============================================================================
@@ -158,8 +168,14 @@ def init_db_schema() -> None:
     conn.close()
 
 
-try_ensure_database_file()
-init_db_schema()
+@st.cache_resource
+def ensure_db_initialized() -> None:
+    """Run schema checks once per application process instead of on every rerun."""
+    try_ensure_database_file()
+    init_db_schema()
+
+
+ensure_db_initialized()
 
 
 def enrich_with_imdb(movies: List[dict]) -> List[dict]:
@@ -205,10 +221,11 @@ def enrich_with_imdb(movies: List[dict]) -> List[dict]:
             return None
 
         try:
+            session = get_http_session()
             # Step 1: get imdb_id from TMDB external_ids (exact match, no year guessing)
             imdb_id = info.get("imdb_id")
             if not imdb_id and TMDB_API_KEY:
-                ext_res = requests.get(
+                ext_res = session.get(
                     f"{TMDB_BASE_URL}/movie/{mid}/external_ids",
                     params={"api_key": TMDB_API_KEY},
                     timeout=5,
@@ -225,7 +242,7 @@ def enrich_with_imdb(movies: List[dict]) -> List[dict]:
                     return None
                 omdb_url = f"http://www.omdbapi.com/?apikey={OMDB_API_KEY}&t={requests.utils.quote(title)}"
 
-            res = requests.get(omdb_url, timeout=5)
+            res = session.get(omdb_url, timeout=5)
             if res.status_code == 200:
                 data = res.json()
                 if data.get("Response") == "True":
@@ -288,96 +305,185 @@ def normalize_movie_record(movie: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def upsert_movie_to_db(movie: dict[str, Any]) -> None:
-    if not movie or not movie.get("id"):
+def upsert_movies_to_db(movies: List[dict[str, Any]]) -> None:
+    """Insert or update multiple movie records in a single database batch."""
+    if not movies:
         return
-    conn = get_db_connection()
-    cur = conn.cursor()
     now = datetime.now(timezone.utc).isoformat()
-    release_date = movie.get("release_date") or ""
-    year = int(release_date[:4]) if release_date and len(release_date) >= 4 and release_date[:4].isdigit() else None
+    params_list = []
+    for movie in movies:
+        if not movie or not movie.get("id"):
+            continue
+        release_date = movie.get("release_date") or ""
+        year = int(release_date[:4]) if release_date and len(release_date) >= 4 and release_date[:4].isdigit() else None
 
-    genres_val = movie.get("genres")
-    if isinstance(genres_val, list):
-        if genres_val and isinstance(genres_val[0], dict):
-            genres_str = ", ".join([g.get("name", "") for g in genres_val])
+        genres_val = movie.get("genres")
+        if isinstance(genres_val, list):
+            if genres_val and isinstance(genres_val[0], dict):
+                genres_str = ", ".join([g.get("name", "") for g in genres_val])
+            else:
+                genres_str = ", ".join(map(str, genres_val))
         else:
-            genres_str = ", ".join(map(str, genres_val))
-    else:
-        genres_str = str(genres_val or "")
+            genres_str = str(genres_val or "")
 
-    cur.execute("""
-    INSERT INTO movies (movie_id, title, year, release_date, tmdb_rating, tmdb_votes, genres, overview, poster_path, popularity, last_updated)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(movie_id) DO UPDATE SET
-        title = excluded.title,
-        year = COALESCE(excluded.year, movies.year),
-        release_date = COALESCE(excluded.release_date, movies.release_date),
-        tmdb_rating = COALESCE(excluded.tmdb_rating, movies.tmdb_rating),
-        tmdb_votes = COALESCE(excluded.tmdb_votes, movies.tmdb_votes),
-        genres = COALESCE(excluded.genres, movies.genres),
-        overview = COALESCE(excluded.overview, movies.overview),
-        poster_path = COALESCE(excluded.poster_path, movies.poster_path),
-        popularity = COALESCE(excluded.popularity, movies.popularity),
-        last_updated = excluded.last_updated
-    """, (
-        movie["id"],
-        movie.get("title") or "Untitled",
-        year,
-        release_date,
-        movie.get("vote_average", 0.0),
-        movie.get("vote_count", 0),
-        genres_str,
-        movie.get("overview", ""),
-        movie.get("poster_path", ""),
-        movie.get("popularity", 0.0),
-        now,
-    ))
-    conn.commit()
-    conn.close()
+        vote_avg = _safe_float(movie.get("vote_average"), 0.0)
+        vote_count = int(movie.get("vote_count") or 0)
+        pop = _safe_float(movie.get("popularity"), 0.0)
+
+        params_list.append((
+            movie["id"],
+            movie.get("title") or "Untitled",
+            year,
+            release_date,
+            vote_avg,
+            vote_count,
+            genres_str,
+            movie.get("overview", ""),
+            movie.get("poster_path", ""),
+            pop,
+            now,
+        ))
+
+    if not params_list:
+        return
+
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        sql = """
+        INSERT INTO movies (movie_id, title, year, release_date, tmdb_rating, tmdb_votes, genres, overview, poster_path, popularity, last_updated)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(movie_id) DO UPDATE SET
+            title = excluded.title,
+            year = COALESCE(excluded.year, movies.year),
+            release_date = COALESCE(excluded.release_date, movies.release_date),
+            tmdb_rating = COALESCE(excluded.tmdb_rating, movies.tmdb_rating),
+            tmdb_votes = COALESCE(excluded.tmdb_votes, movies.tmdb_votes),
+            genres = COALESCE(excluded.genres, movies.genres),
+            overview = COALESCE(excluded.overview, movies.overview),
+            poster_path = COALESCE(excluded.poster_path, movies.poster_path),
+            popularity = COALESCE(excluded.popularity, movies.popularity),
+            last_updated = excluded.last_updated
+        """
+        cur.executemany(sql, params_list)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def upsert_movie_to_db(movie: dict[str, Any]) -> None:
+    if movie and movie.get("id"):
+        upsert_movies_to_db([movie])
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def resolve_letterboxd_item(title: str, year: Optional[int] = None, film_link: str = "") -> Optional[dict[str, Any]]:
     slug = film_link.strip().rstrip("/").split("/")[-1] if film_link else clean_title(title).lower().replace(" ", "-")
     conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT tmdb_id FROM letterboxd_cache WHERE letterboxd_slug=?", (slug,))
-    row = cur.fetchone()
-    if row and row["tmdb_id"]:
-        tmdb_id = row["tmdb_id"]
-        cur.execute("SELECT * FROM movies WHERE movie_id=?", (tmdb_id,))
-        m_row = cur.fetchone()
-        conn.close()
-        if m_row:
-            return normalize_movie_record(dict(m_row))
-
-    params = {"api_key": TMDB_API_KEY, "query": title}
-    if year:
-        params["year"] = year
-
     try:
-        res = requests.get(f"{TMDB_BASE_URL}/search/movie", params=params, timeout=10)
-        if res.status_code == 200:
-            results = res.json().get("results", [])
-            if results:
-                movie = results[0]
-                tmdb_id = movie["id"]
-                upsert_movie_to_db(movie)
-                now = datetime.now(timezone.utc).isoformat()
-                cur.execute("""
-                INSERT INTO letterboxd_cache (letterboxd_slug, tmdb_id, title, year, last_updated)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(letterboxd_slug) DO UPDATE SET tmdb_id=excluded.tmdb_id, last_updated=excluded.last_updated
-                """, (slug, tmdb_id, title, year, now))
-                conn.commit()
-                conn.close()
-                return normalize_movie_record(movie)
-    except Exception:
-        pass
+        cur = conn.cursor()
+        cur.execute("SELECT tmdb_id FROM letterboxd_cache WHERE letterboxd_slug=?", (slug,))
+        row = cur.fetchone()
+        if row and row["tmdb_id"]:
+            tmdb_id = row["tmdb_id"]
+            cur.execute("SELECT * FROM movies WHERE movie_id=?", (tmdb_id,))
+            m_row = cur.fetchone()
+            if m_row:
+                return normalize_movie_record(dict(m_row))
 
-    conn.close()
+        params = {"api_key": TMDB_API_KEY, "query": title}
+        if year:
+            params["year"] = year
+
+        try:
+            session = get_http_session()
+            res = session.get(f"{TMDB_BASE_URL}/search/movie", params=params, timeout=10)
+            if res.status_code == 200:
+                results = res.json().get("results", [])
+                if results:
+                    movie = results[0]
+                    tmdb_id = movie["id"]
+                    upsert_movie_to_db(movie)
+                    now = datetime.now(timezone.utc).isoformat()
+                    cur.execute("""
+                    INSERT INTO letterboxd_cache (letterboxd_slug, tmdb_id, title, year, last_updated)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(letterboxd_slug) DO UPDATE SET tmdb_id=excluded.tmdb_id, last_updated=excluded.last_updated
+                    """, (slug, tmdb_id, title, year, now))
+                    conn.commit()
+                    return normalize_movie_record(movie)
+        except Exception:
+            pass
+    finally:
+        conn.close()
+
     return None
+
+
+def resolve_letterboxd_items_batch(items: List[dict]) -> Dict[str, dict[str, Any]]:
+    """Resolve multiple Letterboxd items using batched cache lookups and concurrent search."""
+    if not items:
+        return {}
+
+    slug_map: Dict[str, dict] = {}
+    for item in items:
+        film_link = item.get("film_link") or ""
+        title = item.get("title") or ""
+        slug = film_link.strip().rstrip("/").split("/")[-1] if film_link else clean_title(title).lower().replace(" ", "-")
+        if slug:
+            slug_map[slug] = item
+
+    all_slugs = list(slug_map.keys())
+    resolved: Dict[str, dict[str, Any]] = {}
+    cached_slug_to_tmdb: Dict[str, int] = {}
+
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        for i in range(0, len(all_slugs), 400):
+            chunk = all_slugs[i : i + 400]
+            placeholders = ",".join("?" for _ in chunk)
+            cur.execute(
+                f"SELECT letterboxd_slug, tmdb_id FROM letterboxd_cache WHERE letterboxd_slug IN ({placeholders})",
+                chunk,
+            )
+            for row in cur.fetchall():
+                if row["tmdb_id"]:
+                    cached_slug_to_tmdb[row["letterboxd_slug"]] = row["tmdb_id"]
+
+        all_tmdb_ids = list(set(cached_slug_to_tmdb.values()))
+        tmdb_movie_map: Dict[int, dict] = {}
+        for i in range(0, len(all_tmdb_ids), 400):
+            chunk = all_tmdb_ids[i : i + 400]
+            placeholders = ",".join("?" for _ in chunk)
+            cur.execute(
+                f"SELECT * FROM movies WHERE movie_id IN ({placeholders})",
+                chunk,
+            )
+            for row in cur.fetchall():
+                tmdb_movie_map[row["movie_id"]] = normalize_movie_record(dict(row))
+    finally:
+        conn.close()
+
+    for slug, tmdb_id in cached_slug_to_tmdb.items():
+        if tmdb_id in tmdb_movie_map:
+            resolved[slug] = tmdb_movie_map[tmdb_id]
+
+    uncached_slugs = [slug for slug in all_slugs if slug not in resolved]
+    if uncached_slugs:
+        def _fetch_uncached(slug: str) -> Tuple[str, Optional[dict]]:
+            item = slug_map[slug]
+            res = resolve_letterboxd_item(item.get("title", ""), item.get("year"), item.get("film_link", ""))
+            return (slug, res)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+            fetched = list(executor.map(_fetch_uncached, uncached_slugs))
+
+        for slug, rec in fetched:
+            if rec:
+                resolved[slug] = rec
+
+    return resolved
 
 
 # ==============================================================================
@@ -435,10 +541,17 @@ def fetch_ranked_movies(genre_id: Optional[int], provider_ids: tuple[int, ...], 
     movies: List[dict] = []
     page = 1
     total_pages: Optional[int] = None
+    session = get_http_session()
 
     seen_ids: set[int] = set()
+    new_movies_to_upsert: List[dict] = []
+
     while len(movies) < limit and (total_pages is None or page <= total_pages) and page <= 25:
-        res = requests.get(f"{TMDB_BASE_URL}/discover/movie", params=build_discover_params(genre_id, list(provider_ids), page, region))
+        res = session.get(
+            f"{TMDB_BASE_URL}/discover/movie",
+            params=build_discover_params(genre_id, list(provider_ids), page, region),
+            timeout=10,
+        )
         if res.status_code != 200:
             break
         payload = res.json()
@@ -447,11 +560,14 @@ def fetch_ranked_movies(genre_id: Optional[int], provider_ids: tuple[int, ...], 
             if movie["id"] not in seen_ids:
                 seen_ids.add(movie["id"])
                 movies.append(movie)
-                upsert_movie_to_db(movie)
+                new_movies_to_upsert.append(movie)
         total_pages = int(payload.get("total_pages") or page)
         if not results:
             break
         page += 1
+
+    if new_movies_to_upsert:
+        upsert_movies_to_db(new_movies_to_upsert)
 
     return sort_movies_by_popularity(movies)[:limit]
 
@@ -472,11 +588,22 @@ def get_combined_service_names() -> List[str]:
     return sorted(combined_services)
 
 
-def save_movie_availability(movie_id: int, region: str, services: List[str]) -> None:
-    """Store the locally useful availability snapshot for the solo browser."""
+def save_movie_availability_batch(records: List[Tuple[int, str, List[str]]]) -> None:
+    """Store availability snapshots in a single database batch."""
+    if not records:
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    params = [
+        (mid, reg, ", ".join(services), now)
+        for (mid, reg, services) in records
+        if mid and reg
+    ]
+    if not params:
+        return
     conn = get_db_connection()
     try:
-        conn.execute(
+        cur = conn.cursor()
+        cur.executemany(
             """
             INSERT INTO availability (movie_id, region_code, services, last_updated)
             VALUES (?, ?, ?, ?)
@@ -484,23 +611,100 @@ def save_movie_availability(movie_id: int, region: str, services: List[str]) -> 
                 services = excluded.services,
                 last_updated = excluded.last_updated
             """,
-            (movie_id, region, ", ".join(services), datetime.now(timezone.utc).isoformat()),
+            params,
         )
         conn.commit()
     finally:
         conn.close()
 
 
-def get_local_movie_services(movie_id: int, region: str) -> List[str]:
+def save_movie_availability(movie_id: int, region: str, services: List[str]) -> None:
+    """Store the locally useful availability snapshot for a single movie."""
+    save_movie_availability_batch([(movie_id, region, services)])
+
+
+def get_batch_movie_services(movie_ids: List[int], region: str) -> Dict[int, List[str]]:
+    """Fetch availability for multiple movies from the database in a single query."""
+    valid_ids = [int(mid) for mid in movie_ids if mid]
+    if not valid_ids:
+        return {}
     conn = get_db_connection()
+    results: Dict[int, List[str]] = {}
     try:
-        row = conn.execute(
-            "SELECT services FROM availability WHERE movie_id=? AND region_code=?",
-            (movie_id, region),
-        ).fetchone()
-        return [service.strip() for service in (row["services"] if row else "").split(",") if service.strip()]
+        cur = conn.cursor()
+        for i in range(0, len(valid_ids), 400):
+            chunk = valid_ids[i : i + 400]
+            placeholders = ",".join("?" for _ in chunk)
+            cur.execute(
+                f"SELECT movie_id, services FROM availability WHERE region_code=? AND movie_id IN ({placeholders})",
+                [region] + chunk,
+            )
+            for row in cur.fetchall():
+                svcs = [s.strip() for s in (row["services"] if row else "").split(",") if s.strip()]
+                results[row["movie_id"]] = svcs
+        return results
     finally:
         conn.close()
+
+
+def get_local_movie_services(movie_id: int, region: str) -> List[str]:
+    res = get_batch_movie_services([movie_id], region)
+    return res.get(movie_id, [])
+
+
+def fetch_movie_watch_providers_live(movie_id: int, region: str = "FI") -> List[str]:
+    """Fetch watch providers directly from TMDB via pooled session."""
+    try:
+        session = get_http_session()
+        response = session.get(
+            f"{TMDB_BASE_URL}/movie/{movie_id}/watch/providers",
+            params={"api_key": TMDB_API_KEY},
+            timeout=8,
+        )
+        if response.status_code != 200:
+            return []
+        payload = response.json().get("results", {}).get(region, {})
+        provider_names: List[str] = []
+        provider_id_to_name = {v: k for k, v in REGION_PROVIDERS.get(region, {}).items()}
+        for bucket in ("flatrate", "free", "ads", "buy", "rent"):
+            for provider in payload.get(bucket, []) or []:
+                pid = provider.get("provider_id")
+                name = provider_id_to_name.get(pid)
+                if name and name not in provider_names:
+                    provider_names.append(name)
+        return provider_names
+    except Exception:
+        return []
+
+
+def fetch_movie_watch_providers_batch(movie_ids: List[int], region: str = "FI") -> Dict[int, List[str]]:
+    """Batch-fetch providers for movie IDs: checks DB first, then queries TMDB in parallel and batch-saves."""
+    if not movie_ids:
+        return {}
+    known = get_batch_movie_services(movie_ids, region)
+    missing_ids = [mid for mid in movie_ids if mid not in known]
+    if missing_ids:
+        def _fetch_one(mid: int) -> Tuple[int, List[str]]:
+            return (mid, fetch_movie_watch_providers_live(mid, region))
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            fetched = list(executor.map(_fetch_one, missing_ids))
+
+        new_records = []
+        for mid, provs in fetched:
+            known[mid] = provs
+            new_records.append((mid, region, provs))
+
+        if new_records:
+            save_movie_availability_batch(new_records)
+
+    return known
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def fetch_movie_watch_providers(movie_id: int, region: str = "FI") -> List[str]:
+    res = fetch_movie_watch_providers_batch([movie_id], region)
+    return res.get(movie_id, [])
 
 
 # ==============================================================================
@@ -517,42 +721,62 @@ def generate_personalized_movie_pool(genre_name: Optional[str], limit: int = MAT
     watchlist_users: dict[int, set[str]] = {}
     high_rating_users: dict[int, set[str]] = {}
 
+    all_lb_items = []
+    user_watchlist_map: List[Tuple[str, dict]] = []
+    user_films_map: List[Tuple[str, dict]] = []
+
     for username, user_data in lobby["users"].items():
         lb = user_data.get("letterboxd")
         if not lb or not lb.get("summary"):
             continue
 
         for item in lb.get("watchlist", []):
-            resolved = resolve_letterboxd_item(item["title"], item.get("year"), item.get("film_link"))
-            if resolved:
-                resolved = normalize_movie_record(resolved)
-            if resolved and resolved.get("id") is not None:
-                mid = resolved["id"]
-                item_scores[mid] = item_scores.get(mid, 0.0) + 50.0
-                item_metadata[mid] = resolved
-                watchlist_users.setdefault(mid, set()).add(username)
+            all_lb_items.append(item)
+            user_watchlist_map.append((username, item))
 
         for item in lb.get("films", []):
             rating_val = item.get("rating")
             parsed_r = parse_rating(f"Title - {rating_val}") if isinstance(rating_val, str) else _safe_float(rating_val)
             if parsed_r and parsed_r >= 4.0:
-                resolved = resolve_letterboxd_item(item["title"], item.get("year"), item.get("film_link"))
-                if resolved:
-                    resolved = normalize_movie_record(resolved)
-                if resolved and resolved.get("id") is not None:
-                    mid = resolved["id"]
-                    item_scores[mid] = item_scores.get(mid, 0.0) + 25.0
-                    item_metadata[mid] = resolved
-                    high_rating_users.setdefault(mid, set()).add(username)
+                all_lb_items.append(item)
+                user_films_map.append((username, item))
+
+    # Batch-resolve Letterboxd items
+    resolved_lb_map = resolve_letterboxd_items_batch(all_lb_items)
+
+    for username, item in user_watchlist_map:
+        film_link = item.get("film_link") or ""
+        title = item.get("title") or ""
+        slug = film_link.strip().rstrip("/").split("/")[-1] if film_link else clean_title(title).lower().replace(" ", "-")
+        resolved = resolved_lb_map.get(slug)
+        if resolved and resolved.get("id") is not None:
+            mid = resolved["id"]
+            item_scores[mid] = item_scores.get(mid, 0.0) + 50.0
+            item_metadata[mid] = resolved
+            watchlist_users.setdefault(mid, set()).add(username)
+
+    for username, item in user_films_map:
+        film_link = item.get("film_link") or ""
+        title = item.get("title") or ""
+        slug = film_link.strip().rstrip("/").split("/")[-1] if film_link else clean_title(title).lower().replace(" ", "-")
+        resolved = resolved_lb_map.get(slug)
+        if resolved and resolved.get("id") is not None:
+            mid = resolved["id"]
+            item_scores[mid] = item_scores.get(mid, 0.0) + 25.0
+            item_metadata[mid] = resolved
+            high_rating_users.setdefault(mid, set()).add(username)
 
     base_discover = fetch_ranked_movies(genre_id, provider_ids, limit, region)
     combined_service_names = set(get_combined_service_names())
     pool_dict: dict[int, dict] = {}
 
+    # Pre-fetch watch providers in batch for all candidate movie IDs in one shot
+    all_candidate_ids = list(set([m["id"] for m in base_discover] + list(item_metadata.keys())))
+    providers_by_id = fetch_movie_watch_providers_batch(all_candidate_ids, region)
+
     for movie in base_discover:
         mid = movie["id"]
-        # Post-filter: confirm the movie is on at least one of the group's services
-        providers = fetch_movie_watch_providers(mid, region)
+        providers = providers_by_id.get(mid, [])
         available = [p for p in providers if p in combined_service_names]
         if not available:
             continue
@@ -567,8 +791,7 @@ def generate_personalized_movie_pool(genre_name: Optional[str], limit: int = MAT
 
     for mid, movie in item_metadata.items():
         if mid not in pool_dict:
-            # Only add Letterboxd items that are actually streamable by this group
-            providers = fetch_movie_watch_providers(mid, region)
+            providers = providers_by_id.get(mid, [])
             available = [p for p in providers if p in combined_service_names]
             if not available:
                 continue
@@ -798,27 +1021,6 @@ def choose_final_winner(results: List[dict]) -> Optional[dict]:
     return max(results, key=lambda result: (result["final_stars"], result["popularity"]))["movie"]
 
 
-@st.cache_data(show_spinner=False, ttl=3600)
-def fetch_movie_watch_providers(movie_id: int, region: str = "FI") -> List[str]:
-    try:
-        response = requests.get(f"{TMDB_BASE_URL}/movie/{movie_id}/watch/providers", params={"api_key": TMDB_API_KEY})
-        if response.status_code != 200:
-            return []
-        payload = response.json().get("results", {}).get(region, {})
-        provider_names: List[str] = []
-        provider_id_to_name = {v: k for k, v in REGION_PROVIDERS.get(region, {}).items()}
-        for bucket in ("flatrate", "free", "ads", "buy", "rent"):
-            for provider in payload.get(bucket, []) or []:
-                pid = provider.get("provider_id")
-                name = provider_id_to_name.get(pid)
-                if name and name not in provider_names:
-                    provider_names.append(name)
-        save_movie_availability(movie_id, region, provider_names)
-        return provider_names
-    except Exception:
-        return []
-
-
 @st.cache_data(show_spinner=False, ttl=3600, max_entries=100)
 def search_tmdb_movies_for_library(query: str, region: str) -> List[dict[str, Any]]:
     """Return title matches from TMDB, whether or not they are in the library."""
@@ -827,9 +1029,10 @@ def search_tmdb_movies_for_library(query: str, region: str) -> List[dict[str, An
 
     genre_names = {genre_id: name for name, genre_id in GENRES.items() if genre_id is not None}
     matches: List[dict[str, Any]] = []
+    session = get_http_session()
     for page in range(1, 4):
         try:
-            response = requests.get(
+            response = session.get(
                 f"{TMDB_BASE_URL}/search/movie",
                 params={
                     "api_key": TMDB_API_KEY,
@@ -1357,36 +1560,49 @@ if st.session_state.app_view == "solo":
     if st.session_state.get("solo_browse_tmdb_query") == search_query:
         tmdb_results = st.session_state.get("solo_browse_tmdb_results", [])
 
+@st.cache_data(ttl=60, show_spinner=False)
+def query_solo_browse_library(browse_region: str, min_rating: float, search_query: str, browse_genre: str, browse_services: tuple[str, ...]) -> List[dict[str, Any]]:
     conn = get_db_connection()
-    cur = conn.cursor()
-    query = """
-        SELECT movies.*, COALESCE(availability.services, '') AS available_on
-        FROM movies
-        LEFT JOIN availability
-            ON availability.movie_id = movies.movie_id
-            AND availability.region_code = ?
-        WHERE movies.tmdb_rating >= ?
-    """
-    params: list[Any] = [browse_region, min_rating]
+    try:
+        cur = conn.cursor()
+        query = """
+            SELECT movies.*, COALESCE(availability.services, '') AS available_on
+            FROM movies
+            LEFT JOIN availability
+                ON availability.movie_id = movies.movie_id
+                AND availability.region_code = ?
+            WHERE movies.tmdb_rating >= ?
+        """
+        params: list[Any] = [browse_region, min_rating]
 
-    if search_query:
-        query += " AND movies.title LIKE ?"
-        params.append(f"%{search_query}%")
-    if browse_genre != "All":
-        query += " AND movies.genres LIKE ?"
-        params.append(f"%{browse_genre}%")
-    if browse_services:
-        service_matchers = " OR ".join(
-            "instr(',' || replace(availability.services, ', ', ',') || ',', ?) > 0"
-            for _ in browse_services
-        )
-        query += f" AND ({service_matchers})"
-        params.extend(f",{service}," for service in browse_services)
+        if search_query:
+            query += " AND movies.title LIKE ?"
+            params.append(f"%{search_query}%")
+        if browse_genre != "All":
+            query += " AND movies.genres LIKE ?"
+            params.append(f"%{browse_genre}%")
+        if browse_services:
+            service_matchers = " OR ".join(
+                "instr(',' || replace(availability.services, ', ', ',') || ',', ?) > 0"
+                for _ in browse_services
+            )
+            query += f" AND ({service_matchers})"
+            params.extend(f",{service}," for service in browse_services)
 
-    query += " ORDER BY movies.popularity DESC LIMIT 48"
-    cur.execute(query, params)
-    sqlite_results = [dict(row) for row in cur.fetchall()]
-    conn.close()
+        query += " ORDER BY movies.popularity DESC LIMIT 48"
+        cur.execute(query, params)
+        return [dict(row) for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+    sqlite_results = query_solo_browse_library(
+        browse_region,
+        min_rating,
+        search_query,
+        browse_genre,
+        tuple(browse_services),
+    )
 
     if tmdb_results:
         def matches_tmdb_filters(movie: dict[str, Any]) -> bool:
@@ -1406,8 +1622,8 @@ if st.session_state.app_view == "solo":
             type="primary",
             key="solo_browse_save_tmdb_results",
         ):
-            for movie in tmdb_results:
-                upsert_movie_to_db(movie)
+            upsert_movies_to_db(tmdb_results)
+            query_solo_browse_library.clear()
             st.session_state.pop("solo_browse_tmdb_results", None)
             st.session_state.pop("solo_browse_tmdb_query", None)
             st.success(f"Saved {len(tmdb_results)} TMDB matches to the shared library.")
@@ -1474,9 +1690,13 @@ if not user_name:
                 if lb_consent and lb_username:
                     with st.spinner(f"Syncing public Letterboxd profile for {lb_username}..."):
                         try:
-                            f_snap = probe_source(lb_username, "films")
-                            w_snap = probe_source(lb_username, "watchlist")
-                            rss_snap = probe_source(lb_username, "rss")
+                            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+                                fut_f = executor.submit(probe_source, lb_username, "films")
+                                fut_w = executor.submit(probe_source, lb_username, "watchlist")
+                                fut_rss = executor.submit(probe_source, lb_username, "rss")
+                                f_snap = fut_f.result()
+                                w_snap = fut_w.result()
+                                rss_snap = fut_rss.result()
 
                             lb_data = {
                                 "synced_at": datetime.now(timezone.utc).isoformat(),
