@@ -1,4 +1,4 @@
-﻿"""Discovery engine -- live TMDB searches with service/region filtering.
+"""Discovery engine -- live TMDB searches with service/region filtering.
 
 Used by the Discover page inside watchmatch_app.py.
 Intentionally self-contained: imports only stdlib + requests + app_config so it
@@ -8,14 +8,13 @@ is safe to import anywhere (does NOT call st.set_page_config or import streamlit
 from __future__ import annotations
 
 import concurrent.futures
-import sqlite3
+
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Dict, List, Literal, Optional, Sequence, Set
 
 import requests
 
-from app_config import DB_PATH, GENRES, REGION_PROVIDERS, get_secret
+from app_config import GENRES, REGION_PROVIDERS, get_db_connection, get_secret
 
 TMDB_API_KEY: str = get_secret("TMDB_API_KEY") or ""
 TMDB_BASE_URL: str = "https://api.themoviedb.org/3"
@@ -46,18 +45,14 @@ def _provider_pipe(region: str, services: Sequence[str]) -> Optional[str]:
     return "|".join(str(i) for i in ids) if ids else None
 
 
-def _get_conn() -> sqlite3.Connection:
-    path = Path(DB_PATH)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path), check_same_thread=False, timeout=30)
-    conn.row_factory = sqlite3.Row
-    return conn
+def _get_conn():
+    return get_db_connection()
 
 
 def upsert_discovered_movies(movies: Sequence[dict]) -> None:
     if not movies:
         return
-    conn = _get_conn()
+    params = []
     now = datetime.now(timezone.utc).isoformat()
     for m in movies:
         movie_id = m.get("id") or m.get("movie_id")
@@ -71,7 +66,30 @@ def upsert_discovered_movies(movies: Sequence[dict]) -> None:
         if not genres_str:
             genre_ids = m.get("genre_ids") or []
             genres_str = ", ".join(_GENRE_ID_TO_NAME[gid] for gid in genre_ids if gid in _GENRE_ID_TO_NAME)
-        conn.execute(
+        params.append(
+            (
+                movie_id,
+                m.get("title") or m.get("original_title") or "",
+                year,
+                release_date,
+                round(float(m.get("vote_average") or m.get("tmdb_rating") or 0), 1),
+                int(m.get("vote_count") or m.get("tmdb_votes") or 0),
+                genres_str,
+                m.get("overview") or "",
+                m.get("poster_path") or "",
+                float(m.get("popularity") or 0),
+                now,
+            )
+        )
+
+    if not params:
+        return
+
+    conn = None
+    try:
+        conn = _get_conn()
+        cur = conn.cursor()
+        cur.executemany(
             """
             INSERT INTO movies (movie_id, title, year, release_date, tmdb_rating, tmdb_votes,
                                 genres, overview, poster_path, popularity, last_updated)
@@ -88,22 +106,17 @@ def upsert_discovered_movies(movies: Sequence[dict]) -> None:
                 popularity   = COALESCE(excluded.popularity,   movies.popularity),
                 last_updated = excluded.last_updated
             """,
-            (
-                movie_id,
-                m.get("title") or m.get("original_title") or "",
-                year,
-                release_date,
-                round(float(m.get("vote_average") or m.get("tmdb_rating") or 0), 1),
-                int(m.get("vote_count") or m.get("tmdb_votes") or 0),
-                genres_str,
-                m.get("overview") or "",
-                m.get("poster_path") or "",
-                float(m.get("popularity") or 0),
-                now,
-            ),
+            params,
         )
-    conn.commit()
-    conn.close()
+        conn.commit()
+    except Exception as exc:
+        print(f"Notice: upsert_discovered_movies skipped or failed: {exc}")
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def search_person(name: str) -> List[dict]:
@@ -417,39 +430,42 @@ def search_tmdb_titles(
 
 
 def fallback_local_search(term: str, region: str, services: Sequence[str]) -> List[dict]:
-    conn = _get_conn()
-    active_services = list(services) if services else list(REGION_PROVIDERS.get(region, {}).keys())
-
-    query = """
-        SELECT m.movie_id, m.title, m.year, m.release_date, m.tmdb_rating, m.tmdb_votes,
-               m.genres, m.overview, m.poster_path, m.popularity, m.runtime,
-               m.directors, m.actors, COALESCE(a.services, '') AS services
-        FROM movies m
-        JOIN availability a ON m.movie_id = a.movie_id AND a.region_code = ?
-        WHERE (a.services IS NOT NULL AND a.services != '')
-    """
-    params: list = [region]
-
-    if term and term.strip():
-        tokens = term.strip().split()
-        for token in tokens:
-            query += " AND (m.title LIKE ? OR m.genres LIKE ? OR m.directors LIKE ? OR m.actors LIKE ? OR m.overview LIKE ?)"
-            pattern = f"%{token}%"
-            params.extend([pattern] * 5)
-
-    query += " ORDER BY m.popularity DESC"
-
+    conn = None
     try:
+        conn = _get_conn()
+        active_services = list(services) if services else list(REGION_PROVIDERS.get(region, {}).keys())
+
+        query = """
+            SELECT m.movie_id, m.title, m.year, m.release_date, m.tmdb_rating, m.tmdb_votes,
+                   m.genres, m.overview, m.poster_path, m.popularity, m.runtime,
+                   m.directors, m.actors, COALESCE(a.services, '') AS services
+            FROM movies m
+            JOIN availability a ON m.movie_id = a.movie_id AND a.region_code = ?
+            WHERE (a.services IS NOT NULL AND a.services != '')
+        """
+        params: list = [region]
+
+        if term and term.strip():
+            tokens = term.strip().split()
+            for token in tokens:
+                query += " AND (m.title LIKE ? OR m.genres LIKE ? OR m.directors LIKE ? OR m.actors LIKE ? OR m.overview LIKE ?)"
+                pattern = f"%{token}%"
+                params.extend([pattern] * 5)
+
+        query += " ORDER BY m.popularity DESC"
+
         cur = conn.cursor()
         cur.execute(query, params)
         rows = [dict(r) for r in cur.fetchall()]
-        conn.close()
-    except Exception:
-        try:
-            conn.close()
-        except Exception:
-            pass
+    except Exception as exc:
+        print(f"Notice: fallback_local_search skipped or failed: {exc}")
         return []
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
     if not rows:
         return []
