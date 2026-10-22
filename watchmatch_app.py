@@ -588,6 +588,13 @@ def get_combined_service_names() -> List[str]:
     return sorted(combined_services)
 
 
+def format_services(services: Any) -> str:
+    """Turn saved provider values into a consistent UI label."""
+    if isinstance(services, (list, tuple, set)):
+        return ", ".join(str(service) for service in services if service)
+    return str(services or "").strip()
+
+
 def save_movie_availability_batch(records: List[Tuple[int, str, List[str]]]) -> None:
     """Store availability snapshots in a single database batch."""
     if not records:
@@ -830,14 +837,6 @@ def reset_lobby() -> None:
             del st.session_state[key]
 
 
-def leave_lobby(user_name: str) -> None:
-    lobby["users"].pop(user_name, None)
-    st.session_state.user_name = None
-    for key in ("join_name", "join_services", "join_lb_username", "join_lb_consent"):
-        if key in st.session_state:
-            del st.session_state[key]
-
-
 def load_next_movie_batch() -> None:
     next_cursor = lobby.get("movie_cursor", 0) + RANK_BATCH_SIZE
     pool = lobby.get("movie_pool", [])
@@ -1021,64 +1020,6 @@ def choose_final_winner(results: List[dict]) -> Optional[dict]:
     return max(results, key=lambda result: (result["final_stars"], result["popularity"]))["movie"]
 
 
-@st.cache_data(show_spinner=False, ttl=3600, max_entries=100)
-def search_tmdb_movies_for_library(query: str, region: str) -> List[dict[str, Any]]:
-    """Return title matches from TMDB, whether or not they are in the library."""
-    if not TMDB_API_KEY or not query.strip():
-        return []
-
-    genre_names = {genre_id: name for name, genre_id in GENRES.items() if genre_id is not None}
-    matches: List[dict[str, Any]] = []
-    session = get_http_session()
-    for page in range(1, 4):
-        try:
-            response = session.get(
-                f"{TMDB_BASE_URL}/search/movie",
-                params={
-                    "api_key": TMDB_API_KEY,
-                    "query": query.strip(),
-                    "region": region,
-                    "include_adult": "false",
-                    "page": page,
-                },
-                timeout=10,
-            )
-            if response.status_code != 200:
-                break
-            payload = response.json()
-        except (requests.RequestException, ValueError):
-            break
-
-        for movie in payload.get("results", []):
-            movie_id = movie.get("id")
-            if not movie_id:
-                continue
-            release_date = movie.get("release_date") or ""
-            matches.append({
-                "id": movie_id,
-                "movie_id": movie_id,
-                "title": movie.get("title") or movie.get("original_title") or "Untitled",
-                "year": int(release_date[:4]) if release_date[:4].isdigit() else None,
-                "release_date": release_date,
-                "tmdb_rating": movie.get("vote_average") or 0.0,
-                "tmdb_votes": movie.get("vote_count") or 0,
-                "genres": [
-                    genre_names[genre_id]
-                    for genre_id in movie.get("genre_ids", [])
-                    if genre_id in genre_names
-                ],
-                "overview": movie.get("overview") or "",
-                "poster_path": movie.get("poster_path") or "",
-                "popularity": movie.get("popularity") or 0.0,
-                "available_on": "",
-            })
-            if len(matches) >= 20:
-                return matches
-        if page >= payload.get("total_pages", 1):
-            break
-    return matches
-
-
 st.set_page_config(page_title="WatchMatch", layout="wide", initial_sidebar_state="expanded")
 # Add page selector for multi-page UI
 st.sidebar.title("🔎 Choose Page")
@@ -1179,7 +1120,7 @@ if page_mode == "Discover":
         movie_frame["tmdb_rating"] = pd.to_numeric(movie_frame["tmdb_rating"], errors="coerce")
         movie_frame["tmdb_votes"] = pd.to_numeric(movie_frame["tmdb_votes"], errors="coerce")
 
-        # Static columns identical to solo_browser_app
+        # Columns shown in the discovery grid.
         visible_columns = ["movie_id", "title", "year", "tmdb_rating", "imdb_rating", "tmdb_votes", "genres", "directors", "actors", "services"]
         grid_frame = movie_frame[visible_columns].copy()
 
@@ -1324,14 +1265,6 @@ if page_mode == "Discover":
 st.html(
     """
     <style>
-    section[data-testid="stSidebar"] div[data-testid="stButton"]:has(button[key*="hidden_"]),
-    div[data-testid="stButton"]:has(button[aria-label*="Hidden"]),
-    div[data-testid="stButton"]:has(button:contains("Hidden")) {
-        display: none !important;
-        height: 0px !important;
-        margin: 0px !important;
-        padding: 0px !important;
-    }
     .badge-pill {
         display: inline-block;
         padding: 2px 8px;
@@ -1347,148 +1280,10 @@ st.html(
     """
 )
 
-st.html(
-    """
-    <script>
-    function bindShortcuts(doc) {
-        if (!doc) return;
-        if (doc.window_watchmatch_keys_bound) return;
-
-        const handleKey = function(e) {
-            const targetTag = (e.target && e.target.tagName) ? e.target.tagName : "";
-            if (targetTag === 'INPUT' || targetTag === 'TEXTAREA' || targetTag === 'SELECT') return;
-
-            const key = (e.key || '').toLowerCase();
-            const buttons = Array.from(doc.querySelectorAll('button'));
-            let handled = false;
-
-            if (key === ' ' || e.code === 'Space' || e.key === 'Spacebar') {
-                const refreshBtn = buttons.find(b => b.innerText.trim() === 'Auto Refresh' || b.innerText.includes('Auto Refresh'));
-                if (refreshBtn) {
-                    refreshBtn.click();
-                    handled = true;
-                }
-            } else if (key === 'h') {
-                const hBtn = buttons.find(b => b.innerText.trim() === 'Help' || b.innerText.includes('Help'));
-                if (hBtn) {
-                    hBtn.click();
-                    handled = true;
-                }
-            } else if (key === 'r') {
-                const rBtn = buttons.find(b => b.innerText.trim() === 'Reset' || b.innerText.includes('Reset'));
-                if (rBtn) {
-                    rBtn.click();
-                    handled = true;
-                }
-            }
-
-            if (handled) {
-                e.preventDefault();
-                e.stopPropagation();
-            }
-        };
-
-        doc.addEventListener('keydown', handleKey, false);
-        doc.window_watchmatch_keys_bound = true;
-    }
-
-    let parentDoc = null;
-    try {
-        if (window.parent && window.parent.document) {
-            parentDoc = window.parent.document;
-        }
-    } catch (e) {}
-    const localDoc = document;
-
-    [parentDoc, localDoc].forEach(bindShortcuts);
-    </script>
-    """,
-    unsafe_allow_javascript=True,
-)
-
-
-@st.dialog("Help & Instructions")
-def show_help_dialog():
-    st.markdown(
-        """
-    **Welcome to WatchMatch!**
-    - **Step 1:** Enter your name, choose streaming services, and optionally provide your Letterboxd username & consent.
-    - **Step 2:** Join the room and wait for your group of friends.
-    - **Step 3:** Start the group match in Watch Party Setup, or select **Browse local library** in the side panel when you want to explore on your own.
-
-    ### 🎬 Modes
-    - **Group Match:** Personalized candidate pool combining Letterboxd watchlists, high ratings, and group streaming availability. Pick up to 5 movies, then vote for your top 3 choices in Phase 2!
-    - **Local movie library:** Browse movies saved in `movies.sqlite`, select your availability region and streaming services, and see each saved movie's streaming services. It does not change an active watch party.
-
-    ---
-    *Keyboard Shortcuts:*
-    - **H**: Show help menu.
-    - **Spacebar**: Manual status refresh.
-    """
-    )
-
-
-@st.dialog("Reset WatchMatch")
-def show_reset_dialog():
-    st.warning("This clears all active users, votes, and the current match.")
-    confirmation = st.text_input("Type reset to confirm", key="reset_confirmation")
-    if st.button("Reset everything", type="primary"):
-        if confirmation.strip().lower() == "reset":
-            reset_lobby()
-            st.rerun()
-        else:
-            st.error("Type reset exactly to confirm.")
-
-
 if "user_name" not in st.session_state:
     st.session_state.user_name = None
-if "app_view" not in st.session_state:
-    st.session_state.app_view = "group"
 
 user_name = st.session_state.user_name
-
-with st.sidebar:
-    with st.container():
-        st.markdown('<div style="display: none;">', unsafe_allow_html=True)
-        if st.button("Help", key="hidden_help_btn"):
-            show_help_dialog()
-        if st.button("Reset", key="hidden_reset_btn"):
-            show_reset_dialog()
-        if st.button("Auto Refresh", key="hidden_auto_refresh_btn"):
-            st.rerun()
-        st.markdown('</div>', unsafe_allow_html=True)
-
-    if st.session_state.app_view == "solo":
-        if st.button("👥 Return to Watch Party", width="stretch", key="sidebar_view_group_btn"):
-            st.session_state.app_view = "group"
-            st.rerun()
-    else:
-        if st.button(
-            "Browse local library",
-            icon=":material/database:",
-            width="stretch",
-            key="sidebar_view_solo_btn",
-        ):
-            st.session_state.app_view = "solo"
-            st.rerun()
-
-    if st.session_state.get("user_name"):
-        st.divider()
-        with st.expander("🚪 Leave / Change Profile"):
-            st.write("Leave the lobby to re-join with a different name or services.")
-            if st.button("Leave Session", width="stretch", key="sidebar_leave_btn"):
-                leave_lobby(st.session_state.user_name)
-                st.rerun()
-
-    with st.expander("⚠️ Reset Session"):
-        st.write("This clears all active users, votes, and matches.")
-        confirmation = st.text_input("Type 'reset' to confirm", key="sidebar_reset_confirmation", label_visibility="collapsed")
-        if st.button("Reset Everything", type="primary", width="stretch", key="sidebar_reset_btn"):
-            if confirmation.strip().lower() == "reset":
-                reset_lobby()
-                st.rerun()
-            else:
-                st.error("Type reset exactly to confirm.")
 
 st.title("🍿 WatchMatch")
 region_label = next((name for name, code in REGIONS.items() if code == lobby.get("region", "FI")), "your region")
@@ -1496,171 +1291,6 @@ st.markdown(f"Personalized movie selection powered by Letterboxd & local SQLite 
 
 if st.button("🔄 Refresh", key="top_refresh_button"):
     st.rerun()
-
-# Solo browsing is a separate activity, entered from the lobby or group setup.
-# Keeping it out of the global header avoids making it look like part of every
-# stage of a live group vote.
-if st.session_state.app_view == "solo":
-    if st.button("Back to watch party", icon=":material/arrow_back:", key="solo_return_to_group"):
-        st.session_state.app_view = "group"
-        st.rerun()
-
-    st.subheader("Browse the shared movie library", anchor=False)
-    st.caption("Search the shared library or TMDB. New title matches are saved to the online library and do not change your watch party.")
-
-    region_names = list(REGIONS.keys())
-    current_region_code = lobby.get("region", "FI")
-    current_region_name = next(
-        (name for name, code in REGIONS.items() if code == current_region_code),
-        region_names[0],
-    )
-    col_search, col_genre, col_rating, col_region = st.columns([3, 2, 2, 2])
-    with col_search:
-        search_query = st.text_input(
-            "Search title",
-            placeholder="e.g. Inception",
-            help="WatchMatch also searches TMDB and saves matching titles to the shared library.",
-        ).strip()
-    with col_genre:
-        browse_genre = st.selectbox("Genre Filter", ["All"] + [g for g in GENRES.keys() if g != "All"])
-    with col_rating:
-        min_rating = st.slider("Min TMDB Rating", 0.0, 10.0, 5.0, 0.5)
-    with col_region:
-        browse_region_name = st.selectbox(
-            "Availability region",
-            region_names,
-            index=region_names.index(current_region_name),
-            key="solo_browse_region",
-        )
-    browse_region = REGIONS[browse_region_name]
-    browse_services = st.multiselect(
-        "Services you have access to",
-        list(REGION_PROVIDERS.get(browse_region, REGION_PROVIDERS["FI"]).keys()),
-        key="solo_browse_services",
-        placeholder="All saved services",
-    )
-    search_tmdb = st.button(
-        "Search TMDB",
-        icon=":material/search:",
-        disabled=not bool(search_query),
-        key="solo_browse_tmdb_search",
-    )
-
-    # Keep TMDB matches separate from the shared-library query. This mirrors the
-    # enrichment tool: a search can find new titles, while saving is explicit.
-    if search_tmdb:
-        with st.spinner(f"Searching TMDB for '{search_query}'..."):
-            st.session_state.solo_browse_tmdb_results = search_tmdb_movies_for_library(
-                search_query,
-                browse_region,
-            )
-            st.session_state.solo_browse_tmdb_query = search_query
-
-    tmdb_results = []
-    if st.session_state.get("solo_browse_tmdb_query") == search_query:
-        tmdb_results = st.session_state.get("solo_browse_tmdb_results", [])
-
-@st.cache_data(ttl=60, show_spinner=False)
-def query_solo_browse_library(browse_region: str, min_rating: float, search_query: str, browse_genre: str, browse_services: tuple[str, ...]) -> List[dict[str, Any]]:
-    conn = get_db_connection()
-    try:
-        cur = conn.cursor()
-        query = """
-            SELECT movies.*, COALESCE(availability.services, '') AS available_on
-            FROM movies
-            LEFT JOIN availability
-                ON availability.movie_id = movies.movie_id
-                AND availability.region_code = ?
-            WHERE movies.tmdb_rating >= ?
-        """
-        params: list[Any] = [browse_region, min_rating]
-
-        if search_query:
-            query += " AND movies.title LIKE ?"
-            params.append(f"%{search_query}%")
-        if browse_genre != "All":
-            query += " AND movies.genres LIKE ?"
-            params.append(f"%{browse_genre}%")
-        if browse_services:
-            service_matchers = " OR ".join(
-                "instr(',' || replace(availability.services, ', ', ',') || ',', ?) > 0"
-                for _ in browse_services
-            )
-            query += f" AND ({service_matchers})"
-            params.extend(f",{service}," for service in browse_services)
-
-        query += " ORDER BY movies.popularity DESC LIMIT 48"
-        cur.execute(query, params)
-        return [dict(row) for row in cur.fetchall()]
-    finally:
-        conn.close()
-
-
-    sqlite_results = query_solo_browse_library(
-        browse_region,
-        min_rating,
-        search_query,
-        browse_genre,
-        tuple(browse_services),
-    )
-
-    if tmdb_results:
-        def matches_tmdb_filters(movie: dict[str, Any]) -> bool:
-            if float(movie.get("tmdb_rating") or 0) < min_rating:
-                return False
-            return browse_genre == "All" or browse_genre in movie.get("genres", [])
-
-        browse_results = [movie for movie in tmdb_results if matches_tmdb_filters(movie)]
-        st.caption(
-            f"TMDB found {len(tmdb_results)} title matches. These are live results and may not yet be in the shared library."
-        )
-        if browse_services:
-            st.caption("Service filtering applies after a title has been saved and its regional availability has been checked.")
-        if st.button(
-            "Save TMDB matches to shared library",
-            icon=":material/save:",
-            type="primary",
-            key="solo_browse_save_tmdb_results",
-        ):
-            upsert_movies_to_db(tmdb_results)
-            query_solo_browse_library.clear()
-            st.session_state.pop("solo_browse_tmdb_results", None)
-            st.session_state.pop("solo_browse_tmdb_query", None)
-            st.success(f"Saved {len(tmdb_results)} TMDB matches to the shared library.")
-            st.rerun()
-    elif st.session_state.get("solo_browse_tmdb_query") == search_query:
-        browse_results = []
-        st.info("TMDB did not find any title matches. Try another spelling or a broader title.")
-    else:
-        browse_results = sqlite_results
-
-    if not browse_results:
-        st.info("No matching movies found. Try broadening your filters or checking the title spelling.")
-    else:
-        if not tmdb_results:
-            st.write(f"Showing **{len(browse_results)}** movies from the shared library:")
-        cols_per_row = 6
-        for i in range(0, len(browse_results), cols_per_row):
-            cols = st.columns(cols_per_row)
-            for j in range(cols_per_row):
-                if i + j < len(browse_results):
-                    movie = browse_results[i + j]
-                    with cols[j]:
-                        with st.container(border=True):
-                            if movie.get("poster_path"):
-                                st.image(f"{TMDB_IMAGE_BASE}{movie['poster_path']}", width="stretch")
-                            st.markdown(f"**{movie['title']}**")
-                            services = movie.get("available_on", "")
-                            if services:
-                                st.caption(f"Watch on: {services}")
-                            else:
-                                st.caption(f"Availability not saved for {browse_region_name}")
-                            st.caption(f"📅 {movie.get('year') or 'N/A'} · TMDB ⭐ {movie.get('tmdb_rating', 'N/A')} · IMDb ⭐ {movie.get('imdb_rating', 'N/A')}")
-                            with st.expander("ℹ️ Details"):
-                                st.write(movie.get("overview", "No overview."))
-
-    st.stop()
-
 
 # GROUP MATCH FLOW
 if not user_name:
@@ -1758,6 +1388,7 @@ else:
                 rows.append({
                     "Stars": int(item["final_stars"]),
                     "Title": m.get("title", "Untitled"),
+                    "Available on": format_services(m.get("available_on")) or "Not available",
                     "TMDB Popularity": round(_safe_float(item["popularity"]), 2),
                     "TMDB Rating": f"{float(m['vote_average']):.1f}" if m.get("vote_average") is not None else "N/A",
                     "IMDb Rating": f"{float(m['imdb_rating']):.1f}" if m.get("imdb_rating") else "N/A",
@@ -1888,6 +1519,7 @@ else:
                                 st.rerun()
                             with st.expander("ℹ️ Info"):
                                 st.write(f"**{movie.get('title', 'Untitled')}** ({str(movie.get('release_date', ''))[:4]})")
+                                st.write(f"**Available on:** {format_services(movie.get('available_on')) or 'Not available'}")
                                 st.write(movie.get("overview", "No overview."))
 
         st.divider()
@@ -1986,6 +1618,7 @@ else:
                                         st.rerun()
                             with st.expander("ℹ️ Details"):
                                 st.write(f"**{movie['title']}** ({str(movie.get('release_date', ''))[:4]})")
+                                st.write(f"**Available on:** {format_services(movie.get('available_on')) or 'Not available'}")
                                 st.write(movie.get("overview", "No overview."))
 
         st.divider()
@@ -2035,6 +1668,7 @@ else:
                             st.markdown(f"**{movie.get('title', 'Untitled')}**")
                             st.caption(f"📅 {str(movie.get('release_date', ''))[:4]} · TMDB ⭐ {movie.get('vote_average', 'N/A')} · IMDb ⭐ {movie.get('imdb_rating', 'N/A')}")
                             with st.expander("ℹ️ Details"):
+                                st.write(f"**Available on:** {format_services(movie.get('available_on')) or 'Not available'}")
                                 st.write(movie.get("overview", "No overview."))
 
         st.divider()
